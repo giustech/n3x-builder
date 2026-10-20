@@ -1,0 +1,280 @@
+{
+  "meta": {
+    "system": "n3x-builder (imagens de build, n3x-plugin e catálogo de alvos)",
+    "hld_owner": "Guilherme Giusti",
+    "version": "1.0",
+    "date": "2026-10-20"
+  },
+  "objective": {
+    "technical_goal": "Transformar a lista de plugins escrita no Dockerfile do operador em dois artefatos reproduzíveis, gerados dentro do Docker: o libn3x.so do sidecar (um por alvo e arquitetura) e o binário do controller, ambos com manifesto embutido. Este HLD é dono do catálogo de alvos, dos comandos n3x-plugin com códigos de erro e exit codes, do formato do manifesto embutido com o hash de integridade e do versionamento das imagens de build com a regra de compatibilidade no runtime (FR-015, regras de build do FR-012 e do FR-013).",
+    "problems_addressed": [
+      "Um .so feito para o Envoy errado só quebraria em produção, porque o istio-proxy 1.31 resolve símbolos de forma tardia",
+      "Plugin incompatível com o SDK, ID duplicado ou código que fura o isolamento precisam ser barrados antes do deploy",
+      "O mesmo Dockerfile precisa gerar o mesmo resultado em qualquer máquina",
+      "O runtime precisa conferir alvo, integridade e versão do .so e do binário sem carregá-los"
+    ],
+    "linked_systems": [
+      "n3x-sdk: manifesto n3x-plugin.yaml, estrutura do repositório de plugin, regras da análise estática, geração de JSON Schema e padrão de IDs",
+      "n3x-sidecar: módulo core/ importado pelo main gerado e imagem de runtime n3x/sidecar, que confere alvo, integridade e versão do manifesto",
+      "n3x-controller: módulo host/ chamado pelo main gerado e imagem de runtime n3x/controller",
+      "n3x-plugin-core: incluído sempre, na versão fixada pela imagem de build",
+      "Go module proxy, sum.golang.org, GitHub e GHCR"
+    ]
+  },
+  "architecture": {
+    "topology_overview": "O builder só existe durante o docker build: não tem serviço, porta nem estado. São imagens OCI com toolchain fixado e a ferramenta n3x-plugin, escrita em Go, que executa um pipeline em etapas que falha cedo: add, resolução, checagem de compatibilidade, análise estática, geração, compilação, verificação de símbolos e teste de carga, manifesto e saída em /out. A imagem ghcr.io/giustech/n3x/sidecar-builder:<semver>-<alvo> traz Go 1.26, toolchain C com glibc igual ou anterior à do Envoy, zig cc para arm64 e o binário do Envoy do alvo; a ghcr.io/giustech/n3x/controller-builder:<semver> traz Go 1.26 sem toolchain C. Cada imagem tem semver próprio, e o runtime aceita a mesma major com minor da imagem igual ou maior que a do core/ ou host/ gravado no manifesto.",
+    "technologies": [
+      "Go 1.26 (go/analysis, debug/elf, go/format) na ferramenta n3x-plugin",
+      "Toolchain C com glibc fixada e zig cc para compilar arm64 a partir de amd64",
+      "objcopy para gravar a seção ELF do manifesto",
+      "govulncheck em todo build",
+      "Docker BuildKit (mount de secret e de cache) e docker buildx para amd64 e arm64",
+      "GHCR como registro das imagens e GitHub Actions como CI"
+    ],
+    "deployment": "cloud",
+    "patterns": [
+      "Pipeline de build em etapas que falha cedo e lista todas as falhas da etapa",
+      "Geração de código determinística (main.go, registro dos plugins e JSON Schema)",
+      "Imagens imutáveis fixadas por digest e build reproduzível",
+      "Toolchain travado na imagem",
+      "Semver próprio por imagem com regra de compatibilidade conferida no runtime"
+    ]
+  },
+  "components": [
+    {
+      "name": "Catálogo de alvos (targets/)",
+      "responsibilities": [
+        "Fixar commit do Envoy, pseudo-versão do SDK Go do Envoy, digest das imagens, glibc, capacidades, arquiteturas e status (candidate, supported, deprecated)",
+        "Embutir o arquivo do alvo em /etc/n3x/target.yaml de cada sidecar-builder"
+      ],
+      "dependencies": ["CI do builder", "go list -m para confirmar a pseudo-versão"]
+    },
+    {
+      "name": "Workspace (/n3x/work)",
+      "responsibilities": ["Guardar go.mod, go.sum e a lista de plugins entre um RUN e outro"],
+      "dependencies": ["Sistema de arquivos da camada"]
+    },
+    {
+      "name": "add",
+      "responsibilities": [
+        "Resolver <módulo>@<versão>, ler o n3x-plugin.yaml e conferir a estrutura",
+        "Aceitar o plugin core só na versão da imagem"
+      ],
+      "dependencies": ["Go module proxy", "GitHub", "Regras de estrutura do n3x-sdk"]
+    },
+    {
+      "name": "Resolvedor",
+      "responsibilities": ["go mod download com o toolchain fixado e conferência do go.sum no sum.golang.org (exceto GOPRIVATE)"],
+      "dependencies": ["Go module proxy", "Secret git_auth"]
+    },
+    {
+      "name": "Checador de compatibilidade",
+      "responsibilities": ["Conferir faixa sdk, IDs e serviços gRPC duplicados, depends_on faltando ou em ciclo, namespace n3x restrito a github.com/giustech/ e presença do core"],
+      "dependencies": ["Manifestos dos plugins", "Versão do SDK da imagem"]
+    },
+    {
+      "name": "Analisador estático",
+      "responsibilities": [
+        "Aplicar as regras do HLD do n3x-sdk com go/analysis sobre os pacotes de cada plugin",
+        "Rodar o govulncheck, só com aviso"
+      ],
+      "dependencies": ["Regras do n3x-sdk", "Base de vulnerabilidades do Go"]
+    },
+    {
+      "name": "Gerador",
+      "responsibilities": ["Criar main.go, registro dos plugins e JSON Schema de cada config, em ordem fixa"],
+      "dependencies": ["Gerador de schema do n3x-sdk", "core/ do n3x-sidecar", "host/ do n3x-controller"]
+    },
+    {
+      "name": "Compilador",
+      "responsibilities": [
+        "go build -buildmode=c-shared -trimpath -ldflags=-buildid= no sidecar, com zig cc para arm64",
+        "Binário estático com CGO_ENABLED=0 no controller"
+      ],
+      "dependencies": ["Toolchain Go e C"]
+    },
+    {
+      "name": "Verificador de símbolos e carga",
+      "responsibilities": [
+        "Comparar símbolos importados e exportados do .so com os do Envoy do alvo",
+        "Na arquitetura nativa, subir o Envoy com bootstrap mínimo que carrega o .so por cerca de 2 s"
+      ],
+      "dependencies": ["Binário do Envoy na imagem sidecar-builder"]
+    },
+    {
+      "name": "Gerador do manifesto",
+      "responsibilities": ["Montar o JSON, calcular o hash, gravar a seção .n3x_manifest e escrever /out/manifest.json"],
+      "dependencies": ["objcopy", "debug/elf"]
+    },
+    {
+      "name": "Relator",
+      "responsibilities": ["Log por etapa em texto ou JSON, resumo final e mensagens N3X-Bxxx com como resolver e link"],
+      "dependencies": ["Todas as etapas"]
+    }
+  ],
+  "flows": {
+    "request_flow": [
+      "RUN n3x-plugin add <módulo>@<versão>, uma linha por plugin: resolve o módulo, confere a estrutura e registra no workspace",
+      "RUN n3x-plugin build passo 1: lê o workspace e o /etc/n3x/target.yaml e inclui o plugin core na versão da imagem",
+      "Passo 2: go mod download com o toolchain fixado, usando o secret git_auth quando houver repositório privado",
+      "Passo 3: confere faixa sdk, IDs e serviços duplicados, depends_on e namespace n3x",
+      "Passo 4: roda a análise estática e o govulncheck",
+      "Passo 5: gera main.go, registro dos plugins e JSON Schema de cada config",
+      "Passo 6: compila o libn3x.so (ou o binário estático do controller)",
+      "Passo 7: verifica os símbolos contra o Envoy do alvo e, na arquitetura nativa, faz o teste de carga (só no sidecar)",
+      "Passo 8: monta o manifesto, calcula o hash e grava a seção .n3x_manifest",
+      "Passo 9: escreve /out/libn3x.so ou /out/n3x-controller e /out/manifest.json",
+      "Estágio final parte de ghcr.io/giustech/n3x/sidecar:<semver>-<alvo> ou ghcr.io/giustech/n3x/controller:<semver> e copia o artefato",
+      "Na subida, o runtime confere alvo, hash, format e versão do core/ ou host/"
+    ],
+    "data_flow": [
+      "Módulos do plugin (Go proxy ou GitHub) → cache de módulos do BuildKit → código gerado → libn3x.so ou binário → manifesto embutido → imagem final no registro do operador",
+      "Struct de types/ → JSON Schema → manifesto → validação do n3x.yaml no sidecar e no controller → mascaramento de segredos pelo plugin core",
+      "n3x-plugin.yaml de cada plugin → manifesto embutido → registro no plugin core → inventário e alerta de divergência de manifesto no painel (FR-006)",
+      "Secret git_auth → só o passo 2, via mount de secret, nunca gravado em camada nem no manifesto",
+      "Avisos do govulncheck → campo warnings do manifesto e /out/manifest.json"
+    ]
+  },
+  "data_model": {
+    "entities": [
+      "Alvo: id, imagem e commit do Envoy, glibc, pseudo-versão do SDK Go do Envoy, capacidades, arquiteturas e status",
+      "Workspace: go.mod, go.sum e lista ordenada de plugins",
+      "Manifesto embutido (formato 1): format, kind, target (só sidecar), arch, builder, runtime (módulo e versão), sdk, go, built_at, plugins (ID, módulo, versão, metades, n3x-plugin.yaml e JSON Schema), warnings e integrity, em JSON na seção ELF .n3x_manifest",
+      "Hash de integridade: SHA-256 do conteúdo das seções ELF com SHF_ALLOC, na ordem do arquivo; .n3x_manifest e built_at ficam fora",
+      "Erro de build: código N3X-Bxxx, categoria (exit code), mensagem, como resolver e link"
+    ],
+    "relationships": [
+      "Manifesto 1:1 com .so ou binário",
+      "Manifesto 1:N com plugins; plugin 1:1 com n3x-plugin.yaml e 1:1 com schema",
+      "Alvo 1:N com imagens sidecar-builder (uma por arquitetura e versão)",
+      "Imagem de build 1:1 com versão de core/ ou host/, de SDK e de plugin core"
+    ],
+    "source_of_truth": "Catálogo de alvos em targets/ do n3x-builder; lista de plugins no Dockerfile do operador; depois do build, o manifesto embutido. O campo format cresce só por adição, e o builder não guarda nada."
+  },
+  "interfaces": [
+    { "name": "n3x-plugin add <módulo>@<versão>", "kind": "sdk", "protocol": "CLI", "exposure": "external", "sla_limits": "Versão exata obrigatória; uma linha por plugin" },
+    { "name": "n3x-plugin build [--log-format text|json]", "kind": "sdk", "protocol": "CLI", "exposure": "external", "sla_limits": "Menos de 60 s com cache e menos de 3 min sem cache, até 5 plugins, amd64 nativo (hipótese)" },
+    { "name": "n3x-plugin version e n3x-plugin targets", "kind": "sdk", "protocol": "CLI", "exposure": "external", "sla_limits": "Mostram versões embutidas e o alvo da imagem" },
+    { "name": "ghcr.io/giustech/n3x/sidecar-builder:<semver>-<alvo>", "kind": "sdk", "protocol": "Imagem OCI", "exposure": "external", "sla_limits": "amd64 e arm64; tags imutáveis" },
+    { "name": "ghcr.io/giustech/n3x/controller-builder:<semver>", "kind": "sdk", "protocol": "Imagem OCI", "exposure": "external", "sla_limits": "amd64 e arm64; tags imutáveis" },
+    { "name": "Secret git_auth, ARG GOPROXY, ARG GOPRIVATE e TARGETARCH", "kind": "sdk", "protocol": "Docker BuildKit", "exposure": "external", "sla_limits": "Secret só no passo de resolução" },
+    { "name": "/out/libn3x.so, /out/n3x-controller e /out/manifest.json", "kind": "sdk", "protocol": "Arquivos", "exposure": "external", "sla_limits": "manifest.json é cópia legível do manifesto embutido" },
+    { "name": "Seção .n3x_manifest", "kind": "sdk", "protocol": "ELF + JSON (formato 1)", "exposure": "internal", "sla_limits": "Só cresce por adição; lida por sidecar, controller e plugin core" },
+    { "name": "targets/<alvo>.yaml", "kind": "sdk", "protocol": "YAML", "exposure": "internal", "sla_limits": "Alvo só vira supported após CI nativa" },
+    { "name": "Erros N3X-B001 a N3X-B013", "kind": "sdk", "protocol": "stderr com exit code por categoria (1 uso, 2 resolução, 3 compatibilidade, 4 análise estática, 5 compilação, 6 símbolos ou carga, 7 manifesto)", "exposure": "external", "sla_limits": "Códigos estáveis, novos só por adição" }
+  ],
+  "scalability_availability": {
+    "strategies": [
+      "Sem tráfego: escalar é ter builds rápidos e previsíveis; falha do builder nunca afeta produção",
+      "arm64 compilado em amd64 com zig cc, sem QEMU; teste de carga arm64 na CI nativa do builder",
+      "GOPROXY e GOPRIVATE configuráveis por ARG; Go proxy ou GitHub fora do ar geram N3X-B001",
+      "Build reproduzível com -trimpath, -ldflags=-buildid=, código gerado em ordem fixa e built_at fora do hash, conferido por build duplo na CI",
+      "Matriz da CI alvo × arquitetura em runners nativos"
+    ],
+    "caching": "Cache de módulos e de build do Go via mount de cache do BuildKit, fora da imagem; módulos de core/, host/, SDK e plugin core já baixados na imagem de build",
+    "partitioning": "Uma imagem sidecar-builder por alvo e arquitetura; controller-builder por arquitetura",
+    "sla_target": "Toda tag publicada continua baixável no GHCR (tags imutáveis, nunca apagadas); patch novo do Envoy 1.40.x ou do Istio 1.31.x vira imagem candidate em até 7 dias (hipótese); build com menos de 60 s com cache e menos de 3 min sem cache (hipótese)"
+  },
+  "security": {
+    "authentication": "Acesso a repositórios privados pelo secret de build git_auth (token do GitHub), montado só no passo de resolução e nunca gravado em camada, log ou manifesto",
+    "authorization": "Namespace n3x exclusivo de github.com/giustech/; plugin core obrigatório e na versão da imagem; análise estática com as regras do HLD do n3x-sdk (go cru, os.Exit, log.Fatal, init() com efeito colateral, unsafe e reflect sobre tipos do SDK, cgo, import do SDK Go do Envoy, de secret/ e de pacotes internos, context.Background() e context.TODO(), chamadas bloqueantes sem ctx e .Reveal() em log; Deprecated só avisa)",
+    "secrets_management": "O único segredo é o git_auth, fornecido no docker buildx build --secret; a chave AES do ENC[...] nunca passa pelo builder",
+    "encryption_in_transit": "Downloads do Go proxy, GitHub e GHCR por HTTPS; go.sum conferido no sum.golang.org, exceto GOPRIVATE",
+    "encryption_at_rest": "Não se aplica: o builder não guarda dados; integridade do artefato por SHA-256 das seções carregáveis conferido no runtime, sem assinatura nem SBOM na v1",
+    "pii_policy": "Sem PII: o builder não lê n3x.yaml, segredos nem dados de usuários; govulncheck só avisa e grava os avisos no campo warnings do manifesto"
+  },
+  "observability": {
+    "logs": "Texto legível por padrão, uma linha por etapa com duração; --log-format json com um evento por etapa (step, status, duration_ms, code); resumo final com plugins, versões, alvo, arquitetura, hash e avisos; git_auth nunca aparece",
+    "metrics": [
+      "Duração de cada etapa do build (no log)",
+      "Taxa de sucesso da matriz alvo × arquitetura na CI do builder",
+      "Tempo de build com e sem cache contra as metas",
+      "Resultado da checagem de reprodutibilidade",
+      "Resultado do teste de carga por patch do Envoy e do Istio"
+    ],
+    "tracing": "Sem tracing na v1 (ADR-009 de plataforma)",
+    "dashboards_alerts": [
+      "Falha da matriz da CI",
+      "Hashes diferentes na checagem de reprodutibilidade",
+      "Falha no teste de carga em patch do Envoy 1.40.x ou do Istio 1.31.x",
+      "Patch novo do Envoy ou do Istio sem imagem candidate em 7 dias"
+    ]
+  },
+  "risks": [
+    {
+      "risk": "Patch do Istio quebra o carregamento do .so",
+      "probability": "high",
+      "impact": "O N3X não carrega, ou derruba o proxy, num cluster com Istio",
+      "mitigation": ["CI por patch do Istio com comparação de símbolos e teste de carga na imagem exata", "Patch novo entra como candidate e só vira supported após passar"],
+      "contingency_plan": "Manter fixado o último patch que passou e documentar o uso do sidecar sem Istio naquele serviço"
+    },
+    {
+      "risk": "SDK Go do Envoy, sem tag, muda e quebra o adaptador",
+      "probability": "high",
+      "impact": "Alvo novo ou patch não compila ou muda de comportamento",
+      "mitigation": ["Pseudo-versão fixada no catálogo e confirmada com go list -m", "CI contra o próximo candidato antes de atualizar o catálogo"],
+      "contingency_plan": "Segurar o alvo na pseudo-versão anterior"
+    },
+    {
+      "risk": ".so arm64 compilado de forma cruzada passa no build e cai no runtime",
+      "probability": "medium",
+      "impact": "Sidecar arm64 não sobe, sem aviso no build do operador",
+      "mitigation": ["Teste de carga em arm64 nativo na CI do builder para cada imagem", "glibc alvo fixada no zig cc"],
+      "contingency_plan": "Recomendar build em runner arm64 nativo; o n3x run falha na subida, antes de receber tráfego"
+    },
+    {
+      "risk": "Análise estática deixa passar um contorno do isolamento",
+      "probability": "medium",
+      "impact": "Plugin lê memória de outro ou derruba o Envoy",
+      "mitigation": ["Corpus de plugins maliciosos em testdata/, que cresce a cada contorno descoberto"],
+      "contingency_plan": "Versão nova do builder com a regra e recompilação do plugin"
+    },
+    {
+      "risk": "Imagens com semver próprio combinadas errado pelo operador",
+      "probability": "medium",
+      "impact": "Sidecar ou controller não sobe",
+      "mitigation": ["Regra de mesma major e minor igual ou maior na subida, com mensagem que diz qual versão usar", "Tabela de pares testados no README"],
+      "contingency_plan": "O runtime recusa antes de receber tráfego e o operador ajusta a tag"
+    },
+    {
+      "risk": "Build não reproduzível por causa do cgo e do zig cc",
+      "probability": "medium",
+      "impact": "Hashes diferentes para a mesma entrada, e a prova de origem perde valor",
+      "mitigation": ["Checagem dupla de reprodutibilidade na CI, em amd64 e arm64"],
+      "contingency_plan": "Documentar a limitação para arm64 até a correção"
+    },
+    {
+      "risk": "Sem lockfile, um módulo ou tag é removido ou fica fora do ar",
+      "probability": "low",
+      "impact": "Build falha com N3X-B001",
+      "mitigation": ["Versões exatas no add", "Cache do Go proxy e GOPROXY corporativo opcional"],
+      "contingency_plan": "O operador aponta o build para o proxy corporativo"
+    }
+  ],
+  "adrs_next_steps": {
+    "adrs": [
+      "ADR-001: Semver próprio por imagem e regra de compatibilidade no runtime",
+      "ADR-002: Hash SHA-256 das seções carregáveis, sem assinatura na v1",
+      "ADR-003: Manifesto JSON na seção ELF .n3x_manifest",
+      "ADR-004: Comparação de símbolos e teste de carga na arquitetura nativa",
+      "ADR-005: Lista de plugins só por RUN n3x-plugin add",
+      "ADR-006: Códigos de erro estáveis N3X-Bxxx",
+      "ADR-007: Build reproduzível",
+      "ADR-008: govulncheck só avisa",
+      "ADR-009: Imagens publicadas no GHCR"
+    ],
+    "pending_decisions": [
+      "Versão exata da glibc das imagens do Envoy 1.40 e do Istio 1.31",
+      "Pseudo-versão do SDK Go do Envoy e patch exato do Istio a declarar no catálogo",
+      "Assinatura e SBOM em versão futura",
+      "Se o bootstrap mínimo do teste de carga funciona igual em todos os alvos"
+    ],
+    "next_steps": [
+      "Criar targets/envoy-1.40.yaml com a pseudo-versão confirmada",
+      "TDD do pipeline n3x-plugin build, começando pelos cenários N3X-B001 a N3X-B013",
+      "Montar o corpus malicioso da análise estática",
+      "Escrever as imagens de build e a CI de matriz com teste de reprodutibilidade",
+      "Teste de carga do .so no istio-proxy 1.31"
+    ]
+  }
+}
