@@ -31,7 +31,7 @@ Responsável: Guilherme Giusti
 
 **Suposições**
 - FDDs 19 a 24 implementadas, com o Dockerfile de desenvolvimento da FDD 21 já acrescido das linhas das FDDs 22 (`binutils-multiarch`) e 23 (Envoy nativo, índices e `symindex`)
-- Os cinco repositórios são públicos no GitHub, o que dá runners `ubuntu-24.04` (amd64) e `ubuntu-24.04-arm` (arm64) hospedados sem custo (hipótese, H-01; FDD 28 usa o mesmo)
+- Os cinco repositórios são públicos no GitHub (confirmado na clarificação), o que dá runners `ubuntu-24.04` (amd64) e `ubuntu-24.04-arm` (arm64) hospedados sem custo (hipótese, H-01; FDD 28 usa o mesmo)
 - O GHCR aceita índice OCI (`application/vnd.oci.image.index.v1+json`) e não tem tag imutável nativa; a imutabilidade é garantida pelo processo (hipótese, spike CI-03)
 - `docker buildx` 0.13 ou mais novo nos runners (`push-by-digest`, `imagetools create`, `--no-cache-filter`)
 - Valores do catálogo (digest, commit, glibc, pseudo-versão) vêm da fase 0 (L-21, FDD 19)
@@ -47,7 +47,7 @@ Responsável: Guilherme Giusti
 - Documentação em pt-BR; identificadores, campos, comandos e rótulos em inglês
 
 **Rastreabilidade**
-- PRD 1.5: FR-015 (imagens por alvo e arquitetura, semver próprio, `docker buildx` multi-arquitetura, `controller-builder` sem sufixo de alvo, secret de build); "Dependências": "Toolchain Go e C fixados", "Registro de containers e repositórios", "Política de ABI do Envoy, verificada na CI a cada patch"; requisitos de compatibilidade ("imagens publicadas no formato OCI", "imagens base fixadas por digest"); critérios de aceite "dois builds do mesmo Dockerfile em máquinas diferentes geram o mesmo hash" e "os mesmos plugins geram `.so` para `envoy-1.40` e `istio-1.31`, em amd64 e arm64, e cada imagem carrega o seu `.so` sem erro"; "Testes e validação" (carga do `.so` em cada imagem, teste negativo com `.so` de Envoy mais novo, reprodutibilidade em amd64 e arm64); "Fora de escopo" (assinatura e SBOM)
+- PRD 1.5: FR-015 (imagens por alvo e arquitetura, semver próprio, `docker buildx` multi-arquitetura, `controller-builder` sem sufixo de alvo; o PRD agora prevê ZIP de módulo Go e `add --archive`, sem secret, conforme a decisão aprovada na clarificação da FDD 20); "Dependências": "Toolchain Go e C fixados", "Registro de containers e repositórios", "Política de ABI do Envoy, verificada na CI a cada patch"; requisitos de compatibilidade ("imagens publicadas no formato OCI", "imagens base fixadas por digest"); critérios de aceite "dois builds do mesmo Dockerfile em máquinas diferentes geram o mesmo hash" e "os mesmos plugins geram `.so` para `envoy-1.40` e `istio-1.31`, em amd64 e arm64, e cada imagem carrega o seu `.so` sem erro"; "Testes e validação" (carga do `.so` em cada imagem, teste negativo com `.so` de Envoy mais novo, reprodutibilidade em amd64 e arm64); "Fora de escopo" (assinatura e SBOM)
 - HLD do `n3x-builder`: "Imagens", "Versionamento e compatibilidade", "Catálogo de alvos", "Ambiente de implantação", "Considerações de escalabilidade e disponibilidade", "Meta de disponibilidade", "Dashboards e alertas", riscos do Istio, do SDK Go do Envoy, do arm64 cruzado, de pares errados e de build não reproduzível; HLD de plataforma, "Matriz de CI entre repositórios" e risco "matriz cara demais"
 - ADRs do `n3x-builder`: ADR-001 (semver por imagem e tabela de pares), ADR-004 (teste de carga nativo), ADR-007 (build reproduzível), ADR-009 (GHCR e tags imutáveis); ADR-008 do `n3x-sdk` (CI cruzada em `n3x-sdk/deploy/`, que fica com a FDD 48); ADR-009 de plataforma (sem tracing)
 - Lacunas do README:
@@ -79,7 +79,7 @@ Responsável: Guilherme Giusti
 - Conteúdo das imagens publicadas `sidecar-builder` (por alvo) e `controller-builder`: caminhos, modos, versões, `ENV`, rótulos OCI e o que `n3x-plugin version` mostra (contrato 1)
 - Regra de semver das duas imagens de build, tags git por imagem, arquivo `images/release.yaml` e o portão `n3xci release check` (contrato 2)
 - Dockerfile único das imagens (`images/Dockerfile`, a partir do da FDD 21) com os acréscimos de publicação: `govulncheck`, cópia da base de vulnerabilidades, rótulos, versão vinda da tag (contrato 3)
-- Interface do operador: `ARG` aceitos, secret, caches, `TARGETARCH` e os Dockerfiles de `examples/` testados como estão (contrato 4, L-59 aplicada)
+- Interface do operador: `ARG` aceitos, `COPY` de ZIP privado, caches, `TARGETARCH` e os Dockerfiles de `examples/` testados como estão (contrato 4, L-59 aplicada)
 - Processo comum de publicação: workflow reutilizável `oci-publish.yml` e a ferramenta `n3xci` (push por digest por arquitetura nativa, recusa de tag existente, índice OCI, registro), usado pelas quatro imagens (contrato 5)
 - Verificação da imagem publicada por perfil (`sidecar-builder`, `controller-builder`, `sidecar`, `controller`), inclusive L-60 e `image.json` contra a tag (contrato 6)
 - Matriz de CI: alvos × arquiteturas × tipo, gatilhos, runners, células e relatórios (`matrix-report.json`, `verify-report.json`) (contrato 7)
@@ -144,7 +144,7 @@ Responsável: Guilherme Giusti
 1. Disparado pelo fim de um release (fluxo 2 ou `runtime-published` do fluxo 3) ou à mão.
 2. `n3xci pairs plan` escolhe os pares: para uma `sidecar-builder` nova com `core/` `X.Y`, as `sidecar` estáveis do mesmo alvo com major `X` e minor `>= Y`, a última patch de cada uma das 3 minors mais novas; para uma `sidecar` nova, o inverso; o mesmo vale para `controller-builder` e `controller` (H-14).
 3. Para cada par e cada arquitetura, no runner nativo: constrói `ci/pairs/sidecar/Dockerfile` (forma do contrato 4, imagens por digest) com core e exemplo, roda `validate --so`, sobe o container com limite de memória e faz uma requisição; no controller, `validate`, `run` e `probe ready` (contrato 11).
-4. O bot abre ou atualiza o PR `compat/pairs-<data>` com as linhas novas em `compat/pairs.json` e a seção gerada do README; PR só com `compat/` e a seção do README pode ter merge automático depois da CI verde (hipótese).
+4. O bot abre ou atualiza o PR `compat/pairs-<data>` com as linhas novas em `compat/pairs.json` e a seção gerada do README; todo merge é manual, inclusive o de PR só com `compat/` e a seção do README (decisão aprovada na clarificação; sem auto-merge).
 
 **Fluxo principal 7: próximo candidato (semanal, segunda às 05:00 UTC, amd64)**
 1. `n3xci next resolve` escolhe o próximo candidato: a maior tag `v1.41.*` do `envoyproxy/envoy`, se existir; senão o digest atual de `envoyproxy/envoy-dev:latest`. Lê o commit por `envoy --version` e a pseudo-versão do SDK Go do Envoy por `go list -m <módulo>@<commit>` (hipótese, H-12).
@@ -438,9 +438,9 @@ LABEL org.opencontainers.image.title="n3x sidecar-builder (${TARGET_ID})" \
 - Assinatura/Rota: forma do contrato 8 da FDD 21; arquivos `examples/sidecar/Dockerfile` e `examples/controller/Dockerfile` no `n3x-builder`
 - Método: n/a
 - Semântica:
-  - **`ARG` aceitos pela imagem** (lista de permissão da FDD 20): `GOPROXY`, `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, `GOSUMDB`, `GOINSECURE`, `GOAUTH`, `NETRC`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `N3X_LOG_FORMAT` (FDD 20), `N3X_VULNDB` (FDD 24); `TARGETOS` e `TARGETARCH` automáticos do BuildKit, expostos por `ARG TARGETARCH` antes da linha `build` (FDD 21); secret `git_auth` (FDD 20); caches `--mount=type=cache,target=/go/pkg/mod` e `target=/root/.cache`
+  - **`ARG` aceitos pela imagem** (lista de permissão da FDD 20): `GOPROXY`, `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, `GOSUMDB`, `GOINSECURE`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `N3X_LOG_FORMAT` (FDD 20), `N3X_VULNDB` (FDD 24); `TARGETOS` e `TARGETARCH` automáticos do BuildKit, expostos por `ARG TARGETARCH` antes da linha `build` (FDD 21); sem secret: plugin privado entra por `COPY` do ZIP e `n3x-plugin add --archive` (decisão aprovada na clarificação da FDD 20; FDD 19); caches `--mount=type=cache,target=/go/pkg/mod` e `target=/root/.cache`
   - **Gerados no release (H-21):** depois de um release estável, `n3xci examples render` reescreve os dois arquivos com as versões e digests recém-publicados e com o par mais novo da tabela; o PR `compat/...` os leva para a `main`. A CI testa os arquivos como estão na `main`, sem `sed`
-  - **Só plugins públicos:** os exemplos usam `github.com/giustech/n3x-sdk/example@v<SDK da imagem>` (FDD 13), que o `add` resolve; o secret aparece montado e é opcional
+  - **Só plugins públicos:** os exemplos usam `github.com/giustech/n3x-sdk/example@v<SDK da imagem>` (FDD 13), que o `add` resolve; o exemplo não usa secret nem `--archive`
   - **Recomendação de espelho:** por limite de download do GHCR (ADR-009), o guia (FDD 47) recomenda copiar por digest para o registro do operador (`docker buildx imagetools create --tag <espelho>:<tag> ghcr.io/...@sha256:<digest>`), o que preserva o digest e mantém o par conferível
 
 **Exemplo de requisição** (`examples/sidecar/Dockerfile`, gerado; digests ilustrativos)
@@ -451,8 +451,7 @@ FROM --platform=$BUILDPLATFORM ghcr.io/giustech/n3x/sidecar-builder:1.0.3-envoy-
 RUN --mount=type=cache,target=/go/pkg/mod \
     n3x-plugin add github.com/giustech/n3x-sdk/example@v1.2.0
 ARG TARGETARCH
-RUN --mount=type=secret,id=git_auth \
-    --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache \
     n3x-plugin build
 
@@ -981,7 +980,7 @@ go run ./ci/n3xci perf run --image n3x-ci/sidecar-builder:envoy-1.40 --set ci/se
 **Logs**
 - `n3xci` escreve em stderr um evento JSON por linha com `N3X_LOG_FORMAT=json` (texto por padrão), no espírito da FDD 20: campos `ts`, `level`, `msg` (evento), `cmd`, `image`, `tag`, `digest`, `platform`, `check`, `rule`, `detail`, `run`
 - Eventos: `gate_passed`, `gate_failed`, `digest_pushed`, `tag_absent`, `tag_exists`, `index_created`, `index_verified`, `index_mismatch`, `verify_check`, `verify_failed`, `repro_compared`, `repro_mismatch`, `upstream_found`, `upstream_stale`, `promote_ready`, `pair_tested`, `pair_failed`, `catalog_propagated`, `perf_measured`, `perf_exceeded`, `alert_opened`, `alert_updated`, `alert_closed`
-- **Proteção de dados:** `GITHUB_TOKEN`, a chave do app do bot, `DOCKERHUB_TOKEN` e o `git_auth` de teste (canário `n3x-canary-`) nunca aparecem: os valores são mascarados pelo Actions (`::add-mask::`) e pelo `n3xci`, e a CI procura o canário nos artefatos com `secrettest.Leaks` (FDD 03). Não há PII
+- **Proteção de dados:** `GITHUB_TOKEN`, a chave do app do bot, `DOCKERHUB_TOKEN` e um token canário de teste (`n3x-canary-`) nunca aparecem: os valores são mascarados pelo Actions (`::add-mask::`) e pelo `n3xci`, e a CI procura o canário nos artefatos com `secrettest.Leaks` (FDD 03). Não há PII
 - **Cardinalidade:** um relatório por célula; até 100 checagens por perfil
 
 **Tracing**

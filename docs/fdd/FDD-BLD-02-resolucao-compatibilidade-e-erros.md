@@ -10,11 +10,11 @@ Responsável: Guilherme Giusti
 
 **Problema técnico.** O `n3x-plugin build` junta, num único `go build`, código de origens diferentes: os plugins do operador, o SDK, o runtime (`core/` do sidecar ou `host/` do controller) e o plugin core. Cada um tem o próprio `go.mod`, e a seleção de versão mínima do Go (MVS) escolhe, para cada módulo, a maior versão exigida no grafo. Isso cria um furo que nenhum documento fecha (L-57): um plugin cujo `go.mod` exige o SDK `v1.4.0` faz o build compilar o SDK `v1.4.0`, mesmo que a imagem anuncie e valide com o SDK `v1.2.0`. A checagem da faixa `sdk` do `n3x-plugin.yaml` passa (a faixa diz `>=1.0.0 <2.0.0`), o manifesto embutido grava `sdk: 1.2.0`, e o `.so` sai com outro SDK, compilado contra um `core/` que não conhece os métodos novos. O mesmo vale para o runtime, o plugin core e o SDK Go do Envoy.
 
-Além disso, o builder ainda não tem um formato de erro definido. O ADR-006 fixa os códigos `N3X-B001` a `N3X-B013`, os exit codes por categoria e a regra "lista todas as falhas da etapa", mas não define: o texto exato da mensagem, o evento JSON, os valores de `status`, como várias falhas aparecem, o resumo final, o catálogo `docs/erros.md` e a interface que as outras etapas usam para reportar. A FDD 19 já emite sete códigos no `add` e deixou para esta FDD o formato, o mecanismo do secret `git_auth` e o código de checksum divergente. A FDD 02 pediu um código para falha do gerador de schema (`N3X-B014`).
+Além disso, o builder ainda não tem um formato de erro definido. O ADR-006 fixa os códigos `N3X-B001` a `N3X-B013`, os exit codes por categoria e a regra "lista todas as falhas da etapa", mas não define: o texto exato da mensagem, o evento JSON, os valores de `status`, como várias falhas aparecem, o resumo final, o catálogo `docs/erros.md` e a interface que as outras etapas usam para reportar. A FDD 19 já emite sete códigos no `add` e deixou para esta FDD o formato e o código de checksum divergente. O acesso a módulos privados por secret foi substituído por decisão aprovada na clarificação: ZIPs privados copiados para o build. A FDD 02 pediu um código para falha do gerador de schema (`N3X-B014`).
 
 **Encaixe no HLD.** Esta FDD especifica, no repositório `n3x-builder` (HLD, "Componentes e responsabilidades"), três componentes:
 
-- **Resolvedor** (`internal/resolve`): passo 2 do `build`, com o ambiente do `go`, o secret `git_auth`, `ARG GOPROXY` e `ARG GOPRIVATE`, e o módulo de build onde as etapas seguintes trabalham
+- **Resolvedor** (`internal/resolve`): passo 2 do `build`, com o ambiente do `go`, arquivos privados de módulos Go copiados para o contexto, `ARG GOPROXY` e `ARG GOPRIVATE`, e o módulo de build onde as etapas seguintes trabalham
 - **Checador de compatibilidade** (`internal/check`): passo 3, com faixa `sdk`, versões fixadas pela imagem (L-57), toolchain Go, duplicidades, `depends_on`, namespace `n3x` e presença do core
 - **Relator** (`internal/report`): formato da mensagem, evento JSON, exit code, log por etapa, resumo final e catálogo `docs/erros.md`, usado por todas as etapas e pelo `add`
 
@@ -22,7 +22,7 @@ E o passo 1 do `build`: leitura do workspace, da identidade da imagem e do alvo,
 
 Quem consome:
 
-- FDD 19 (BLD-01): o `add` usa o relator, o ambiente do `go`, o helper de credencial e as funções `check.SDKRange` e `check.Namespace`
+- FDD 19 (BLD-01): o `add` usa o relator, o ambiente do `go`, a ingestão de ZIP privado e as funções `check.SDKRange` e `check.Namespace`
 - FDD 21 (BLD-03): gera e compila no módulo de build `/n3x/build`, sem rede de módulos; usa o relator para `N3X-B010` e `N3X-B014`
 - FDD 22 (BLD-04): monta `plugins[]` do manifesto a partir da lista checada no passo 3 (inclusive o manifesto do core) e copia avisos para `warnings`; usa o relator para `N3X-B013`
 - FDD 23 (BLD-05): usa o relator para `N3X-B011` e `N3X-B012` e para a etapa 7 pulada
@@ -37,8 +37,7 @@ Quem consome:
 **Suposições**
 - A FDD 19 está implementada: `internal/catalog`, `internal/image`, `internal/workspace`, o `add` e os arquivos `/etc/n3x/target.yaml` e `/etc/n3x/builder.yaml` (FDD 19, contratos 1 a 5)
 - O SDK `v0.1.0` (marco M1) traz `plugin.ReadSDKRange`, `SDKRange.Contains`, `plugin.DecodeManifest`, `plugin.CheckNamespace`, `ID.MetricPrefix`, `ID.GRPCPackage`, `plugin.FieldErrors` (FDD 01), `yamlconv.ToJSON` (FDD 01) e `schemagen` (FDD 02)
-- O Docker do operador usa BuildKit, com `--mount=type=secret` e `--mount=type=cache` (HLD do `n3x-builder`)
-- A imagem de build tem git 2.31 ou superior (necessário para `GIT_CONFIG_COUNT`) (hipótese; pedido às FDDs 21 e 46)
+- O Docker do operador usa BuildKit e `--mount=type=cache`; módulos privados são fornecidos como ZIPs de módulo Go e arquivos locais no contexto do build, sem credencial disponível aos comandos do builder (decisão aprovada na clarificação)
 - Os módulos `github.com/giustech/*` fixados pela imagem são públicos
 
 **Restrições**
@@ -46,20 +45,21 @@ Quem consome:
 - O build termina a etapa em que falhou e lista todas as falhas dela (ADR-006)
 - Namespace `n3x` reservado a módulos `github.com/giustech/`; ID duplicado faz o build falhar (ADR-012 do `n3x-sdk`)
 - Cada imagem traz uma versão do SDK, e o build recusa plugin cuja faixa `sdk` não a inclua (ADR-021 do `n3x-sdk`)
-- O secret `git_auth` é usado só na resolução, via `--mount=type=secret`, e nunca vai para camada, log ou manifesto (HLD do `n3x-builder`)
+- O builder não recebe token de acesso ao GitHub; plugin privado e dependências privadas transitivas são fornecidos no contexto por arquivos de módulo Go, validados e resolvidos sem credencial (decisão aprovada na clarificação)
 - Go proxy ou GitHub fora do ar: o build falha com `N3X-B001`, sem efeito em runtime (HLD)
 - Log em texto por padrão, uma linha por etapa com duração; `--log-format json` com `step`, `status`, `duration_ms` e `code` (HLD)
 - O builder reaproveita as regras do SDK e não reimplementa nenhuma (FDDs 01 e 19); o `n3x-plugin` não importa `secret/`
 - Documentação e mensagens em pt-BR; identificadores, campos e comandos em inglês
 
 **Rastreabilidade**
-- PRD 1.5: FR-015 (o `build` "resolve as dependências com o toolchain Go fixado na imagem, checa a compatibilidade de cada plugin com a versão do SDK da imagem"; erros "plugin incompatível com a versão do SDK: mostra a versão exigida e a disponível", "dois plugins com o mesmo ID", "tentativa de remover o plugin core", "toda falha do build tem um código estável, uma linha de como resolver e o link"; credencial privada como secret de build); FR-013 ("dependência declarada que não está na imagem: o build falha"; "ID no namespace `n3x` de fora dos repositórios oficiais: o build recusa"); FR-011 ("dois plugins com o mesmo ID ou o mesmo nome de serviço gRPC: o build falha"); critério de aceite "o `n3x-plugin build` falha, com o código do cenário, nos casos de plugin incompatível com o SDK, ID duplicado [...] e tentativa de remover o plugin core"; "Estratégia de validação" (TDD do pipeline)
+- PRD 1.5: FR-015 (o `build` "resolve as dependências com o toolchain Go fixado na imagem, checa a compatibilidade de cada plugin com a versão do SDK da imagem"; erros "plugin incompatível com a versão do SDK: mostra a versão exigida e a disponível", "dois plugins com o mesmo ID", "tentativa de remover o plugin core", "toda falha do build tem um código estável, uma linha de como resolver e o link"; credencial privada: o PRD agora prevê ZIP de módulo Go e `add --archive`, sem secret, conforme a decisão aprovada na clarificação); FR-013 ("dependência declarada que não está na imagem: o build falha"; "ID no namespace `n3x` de fora dos repositórios oficiais: o build recusa"); FR-011 ("dois plugins com o mesmo ID ou o mesmo nome de serviço gRPC: o build falha"); critério de aceite "o `n3x-plugin build` falha, com o código do cenário, nos casos de plugin incompatível com o SDK, ID duplicado [...] e tentativa de remover o plugin core"; "Estratégia de validação" (TDD do pipeline)
 - HLD do `n3x-builder`: "Componentes e responsabilidades" (Resolvedor, Checador, Relator), "Fluxo de requisição" (passos 1 a 3), "Erros do build", "Observabilidade", "Segurança", "Considerações de escalabilidade"; HLD de plataforma: "Regras de versionamento entre repositórios"; HLD do `n3x-sdk`: "Estrutura padrão de um repositório de plugin" e "Manifesto"
 - ADRs do `n3x-builder`: ADR-001 (semver por imagem), ADR-005 (lista só por `RUN n3x-plugin add`), ADR-006 (códigos `N3X-Bxxx`), ADR-007 (build reproduzível); ADRs do `n3x-sdk`: ADR-011 (módulo único), ADR-012 (ID e namespace), ADR-021 (faixa `sdk` e semver estrito)
 - FDDs anteriores: 01 (regras do manifesto, `MetricPrefix`, pedido de recusar prefixo de métrica igual), 02 (pedido do `N3X-B014`, programa auxiliar do passo 5), 05 (L-57 citada no contrato de compatibilidade do proxy), 19 (workspace, arquivos da imagem, códigos do `add`, pedidos P-01 a P-03)
 - Lacunas do README:
   - **L-57 fechada:** o módulo de build exige explicitamente o SDK, o runtime, o plugin core e, no sidecar, o SDK Go do Envoy nas versões da imagem, o que vira piso no MVS; o checador exige que a versão selecionada seja exatamente a da imagem. Se o `go.mod` de qualquer plugin, direta ou transitivamente, puxar versão maior ou outra major, o build falha com `N3X-B004` (SDK, runtime e SDK Go do Envoy) ou `N3X-B008` (plugin core), mostrando quem exige o quê. Não há `replace`: rebaixar em silêncio compilaria o plugin contra uma API que o autor não testou (contrato 9, regras 2 a 5)
-- Pontos abertos da FDD 19 fechados aqui: P-01 (formato da mensagem e do evento, `status`, link, variável de ambiente do formato), P-02 (mecanismo do `git_auth` e lista final de variáveis) e P-03 (código de checksum divergente e de Go mais novo)
+- Decisão aprovada na clarificação: plugins públicos continuam sendo adicionados por módulo e versão; para plugins privados, o operador copia um ZIP no formato de módulo Go e usa `n3x-plugin add --archive <caminho>`. Os arquivos locais também precisam cobrir as dependências privadas transitivas; nenhum token é montado ou passado ao builder. O contrato detalhado de ingestão do ZIP pertence à FDD 19 (BLD-01) e será reavaliado nela.
+- Pontos abertos da FDD 19 fechados aqui: P-01 (formato da mensagem e do evento, `status`, link, variável de ambiente do formato) e P-03 (código de checksum divergente e de Go mais novo). P-02 (mecanismo do `git_auth`) foi substituído pela decisão de usar arquivos privados locais, sem credencial no builder.
 
 ---
 
@@ -71,7 +71,7 @@ Quem consome:
 - **SDK compilado igual ao anunciado (L-57).** Invariante: depois de um passo 3 sem falhas, a versão selecionada do SDK, do runtime, do plugin core e, no sidecar, do SDK Go do Envoy é exatamente a da imagem (`builder.yaml` e alvo). Conferido no próprio passo 3 e por teste com plugin que exige versão maior.
 - **Erro com código e caminho de correção.** Invariante: todo problema de build sai com código `N3X-Bxxx`, motivo, "como resolver" e link para `docs/erros.md#n3x-bxxx`; todo erro de uso sai com exit 1, "como resolver" e link para `docs/erros.md#erros-de-uso`.
 - **Catálogo e código nunca divergem.** Medida: `docs/erros.md` é gerado do catálogo em Go e a CI falha se o arquivo estiver desatualizado; nos testes, o relator em modo estrito entra em panic se uma etapa reportar regra não declarada para o código.
-- **Segredo nunca exposto.** Invariante: o conteúdo de `/run/secrets/git_auth` não aparece em stdout, stderr, `/n3x/work`, `/n3x/build`, `/out`, na camada nem no ambiente de nenhum processo filho. Conferido com um token canário em sucesso e em falha.
+- **Sem credenciais no builder.** Invariante aprovado na clarificação: `add` e `build` não recebem token de acesso ao GitHub, por arquivo, variável de ambiente ou argumento. ZIPs e proxy local podem conter código privado e devem ser tratados como conteúdo confidencial no contexto e no cache do estágio de build.
 - **Sem rede de módulos depois do passo 2.** Invariante: as etapas 4 a 6 rodam o `go` com `GOPROXY=off` e `-mod=readonly`; um módulo que faltar nelas é bug do resolvedor (hipótese, pedido às FDDs 21 e 24).
 - **Passos 1 e 3 baratos.** Medida: passos 1 e 3 juntos em até 1 s com 50 plugins; passo 2 com o cache de módulos aquecido em até 5 s no p95 de 10 execuções com 5 plugins, num runner amd64 da CI (hipótese).
 
@@ -83,7 +83,7 @@ Quem consome:
 - Passo 1 do `build`: leitura e validação de `/etc/n3x/builder.yaml`, `/etc/n3x/target.yaml` (só na `sidecar-builder`) e `/n3x/work/plugins.json`; avisos de alvo `candidate` ou `deprecated`; inclusão do plugin core na versão da imagem; build só com o core quando o workspace está vazio (hipótese)
 - Passo 2 do `build`: módulo de build `/n3x/build`; `go.mod` com os plugins e as versões fixadas pela imagem; `go.sum` semeado pelo workspace e pela imagem; módulos fixados servidos pela imagem (`/usr/share/n3x/pinned`); `go mod download` dos plugins e `go list -deps` dos pacotes raiz com o mesmo contexto de build da compilação; conferência no `sum.golang.org`, exceto `GOPRIVATE`; classificação dos erros do `go`
 - Ambiente do processo `go` (lista de permissão, valores fixos, `ARG GOPROXY`, `ARG GOPRIVATE` e demais variáveis), compartilhado com o `add`
-- Mecanismo do secret `git_auth`: helper de credencial `n3x-plugin git-credential`, configurado só por variáveis de ambiente, sem gravar arquivo
+- Resolução de plugins privados por ZIP de módulo Go fornecido via `COPY` e `n3x-plugin add --archive`; dependências privadas transitivas fornecidas em fonte local de módulos, sem helper de credencial
 - Passo 3 do `build`: faixa `sdk`; versões fixadas pela imagem (L-57); versão do Go exigida; ID duplicado (com o pacote gRPC e as rotas derivados); prefixo de métrica duplicado (pedido da FDD 01); `depends_on` faltando, sem metade de controller ou em ciclo; namespace `n3x`; presença e validade do core; aviso de dependência compartilhada atualizada
 - Relator: formato de erro, aviso e uso em texto; evento JSON; valores de `status`; agrupamento e ordem dos problemas; limite de problemas por etapa; exit code; mascaramento; linha por etapa; resumo final
 - Catálogo completo dos códigos `N3X-B001` a `N3X-B016`, com os três novos: `N3X-B014` (pedido da FDD 02), `N3X-B015` (checksum divergente, pedido da FDD 19) e `N3X-B016` (Go mais novo que o da imagem, pedido da FDD 19)
@@ -112,7 +112,7 @@ Quem consome:
 
 Antes do passo 1 (sem rede):
 1. Lê a flag `--log-format` e a variável `N3X_LOG_FORMAT`; a flag vence. Argumento posicional, flag desconhecida ou formato inválido: erro de uso, exit 1.
-2. Cria o relator (contrato 7) com o mascarador: se `/run/secrets/git_auth` existe, o valor é lido uma vez (até 4 KiB) só para ser mascarado em toda saída.
+2. Cria o relator (contrato 7) com mascaramento de caminhos locais e credenciais em URLs do ambiente. Não lê nem monta token GitHub; o builder não recebe credenciais.
 
 **Passo 1. Workspace e alvo** (`[1/9] lendo workspace e alvo`, sem rede)
 1. `image.Load("/etc/n3x/builder.yaml")` (FDD 19). Ausente ou inválido: uso (`image_invalid`), exit 1.
@@ -124,7 +124,7 @@ Antes do passo 1 (sem rede):
 7. Linha da etapa, por exemplo `(2 plugins + core; envoy-1.40 candidate; amd64)`.
 
 **Passo 2. Resolução** (`[2/9] resolvendo módulos`, prazo total de 300 s)
-1. **Ambiente.** Monta o ambiente do `go` por lista de permissão (contrato 10): variáveis herdadas do Dockerfile, valores fixos, `GOPROXY` com o proxy em arquivo da imagem na frente e o helper de credencial, se o secret existir. Emite avisos de ambiente (`goflags_ignored`, `sumdb_off`, `insecure_fetch`, `pinned_bypass`).
+1. **Ambiente.** Monta o ambiente do `go` por lista de permissão (contrato 10): variáveis herdadas do Dockerfile, valores fixos, proxy da imagem e fontes locais copiadas pelo operador. Não instala nem configura helper ou credencial. Emite avisos de ambiente (`goflags_ignored`, `sumdb_off`, `insecure_fetch`, `pinned_bypass`).
 2. **Módulo de build.** Recria `/n3x/build` vazio e grava (contrato 8):
    - `go.mod`: `module n3x.local/build`, `go <Go da imagem>` e `require` de todos os plugins da lista (versão de `plugins.json`), do plugin core, do SDK e do runtime nas versões de `builder.yaml` e, na `sidecar-builder`, do SDK Go do Envoy na versão de `envoy_go_sdk` do alvo. Os quatro módulos fixados viram piso do MVS
    - `go.sum`: linhas do `/n3x/work/go.sum` mais `/usr/share/n3x/pinned/go.sum`, ordenadas e sem repetição. Duas linhas com hash diferente para o mesmo `módulo versão`: `N3X-B015` (`checksum`)
@@ -159,13 +159,13 @@ Antes do passo 1 (sem rede):
 - **Plugin exige o plugin core em outra versão** (por exemplo, importa o client gRPC do core): `N3X-B008` (`core_gomod`).
 - **Dependência exige Go mais novo:** detectado no passo 2. Se é o próprio plugin, no item 3 (`go mod download`); se é transitiva, o `go list` falha com o texto `requires go >= X (running go Y; GOTOOLCHAIN=local)`, classificado como `N3X-B016`. O passo 3 repete a checagem pela `GoVersion` da lista de build (defesa em profundidade). Exit 3.
 - **Dependência compartilhada atualizada** (ex.: `google.golang.org/grpc`): o MVS escolhe a maior versão exigida, e isso é permitido, porque dentro da mesma major o Go garante compatibilidade de importação. O passo 3 compara a lista de build com `/usr/share/n3x/pinned/modules.txt` e emite o aviso `dependency_upgraded` com o módulo, a versão da imagem, a selecionada e quem exige. Não falha (hipótese).
-- **Repositório privado sem `GOPRIVATE`:** o proxy público responde 404 ou 410, o `go` cai em `direct`, clona com a credencial e depois falha ao consultar o `sum.golang.org`. Classificado como `N3X-B001` (`not_in_sumdb`), com "defina `ARG GOPRIVATE=github.com/acme/*`".
-- **Repositório privado sem o secret:** o git pede credencial; com `GIT_TERMINAL_PROMPT=0`, falha na hora. `N3X-B001` (`no_access`), com "monte o secret na linha do `build` e na do `add`".
+- **Plugin privado adicionado por referência remota:** `add <módulo>@<versão>` não recebe credencial e não autentica no VCS. O erro remoto é `N3X-B001` (`no_access`); a correção orienta copiar um ZIP canônico do módulo ao contexto e usar `n3x-plugin add --archive <caminho>`.
+- **Dependência privada transitiva ausente dos arquivos locais:** a resolução não tenta buscá-la em proxy público ou VCS. Falha com `N3X-B001` e identifica o módulo ausente, orientando a incluí-lo na fonte local de módulos privados.
 - **`GOPROXY=off` do operador:** os módulos fixados vêm do proxy em arquivo da imagem; os plugins falham com `N3X-B001` (`proxy_off`). Um build só com o core funciona sem rede.
 - **Cache montado em `/go/pkg/mod`:** o `--mount=type=cache` esconde o que a imagem tivesse em `/go/pkg/mod`; por isso os módulos fixados ficam em `/usr/share/n3x/pinned/proxy`, fora do cache, e entram no `GOPROXY` como `file://` (hipótese).
 - **`depends_on` na `sidecar-builder`:** a dependência é da metade de controller (FDD 01, `ControllerManifest`). Como o FR-006 permite listas diferentes entre sidecar e controller, a `sidecar-builder` só avisa (`depends_missing`, `depends_no_controller`, `depends_cycle`) e a `controller-builder` falha com `N3X-B006` (hipótese).
 - **Workspace vazio:** build só com o plugin core; a linha do passo 1 diz `(0 plugins + core)` (hipótese).
-- **Erro interno do `n3x-plugin`** (panic, disco cheio em `/n3x/build`, `/out` sem permissão): uso com regra `internal`, exit 1, mensagem "erro interno do n3x-plugin" com o pedido de abrir issue; o panic é recuperado no topo do comando e nunca imprime o valor do secret.
+- **Erro interno do `n3x-plugin`** (panic, disco cheio em `/n3x/build`, `/out` sem permissão): uso com regra `internal`, exit 1, mensagem "erro interno do n3x-plugin" com o pedido de abrir issue; o panic é recuperado no topo do comando e detalhes de erro são mascarados.
 - **`build` rodado duas vezes no mesmo estágio:** `/n3x/build` é recriado do zero no passo 2; o resultado é o mesmo.
 
 **Diagramas**
@@ -186,7 +186,7 @@ sequenceDiagram
     B->>F: builder.yaml, target.yaml, plugins.json
     B->>R: avisos target_*; End (ou exit 1)
     B->>R: Begin(2, resolve)
-    B->>B: ambiente por lista de permissão e helper git_auth
+    B->>B: ambiente por lista de permissão e fontes locais de módulos
     B->>F: grava /n3x/build/go.mod e go.sum
     B->>G: go mod download -json plugins (diretório vazio)
     G->>P: .info, .mod, .zip e sum.golang.org
@@ -248,7 +248,7 @@ flowchart TD
 - Método: n/a
 - Semântica de status/headers:
   - Sem argumento posicional. Flag desconhecida, argumento posicional ou formato inválido: exit 1
-  - Lê: `/etc/n3x/builder.yaml`, `/etc/n3x/target.yaml` (sidecar), `/n3x/work/`, `/usr/share/n3x/pinned/`, `/run/secrets/git_auth` (opcional) e o ambiente
+  - Lê: `/etc/n3x/builder.yaml`, `/etc/n3x/target.yaml` (sidecar), `/n3x/work/`, `/usr/share/n3x/pinned/`, as fontes locais de módulos privados copiadas pelo operador e o ambiente; não lê secrets
   - Escreve: `/n3x/build/` (a partir do passo 2) e `/out/` (só no passo 9, FDD 22). Um build que falha não deixa artefato novo em `/out`
   - Saída: tudo no stderr; stdout vazio
   - Exit codes:
@@ -272,9 +272,8 @@ flowchart TD
 | `--log-format` | flag | `text` | `text` ou `json`; vence a variável |
 | `N3X_LOG_FORMAT` | `ARG` ou `ENV` | (vazio) | mesmo efeito da flag, para todas as linhas `RUN` (hipótese) |
 | `GOPROXY` | `ARG` | `https://proxy.golang.org,direct` | o proxy em arquivo da imagem entra sempre na frente |
-| `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB` | `ARG` | (vazio) | módulos privados fora do proxy público e do `sum.golang.org` |
+| `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB` | `ARG` | (vazio) | padrões privados e comportamento de checksum; módulos privados são servidos da fonte local |
 | `GOSUMDB`, `GOINSECURE` | `ARG` | `sum.golang.org`, (vazio) | `off` e valores não vazios geram aviso |
-| secret `git_auth` | `--mount=type=secret,id=git_auth` | ausente | token do GitHub; usado só no passo 2 e no `add` |
 | prazo do passo 2 | fixo | 300 s | uma nova tentativa só para erro `network` (hipótese) |
 
 **Exemplo de requisição**
@@ -285,15 +284,16 @@ ARG GOPRIVATE=github.com/acme/*
 ARG N3X_LOG_FORMAT=text
 RUN --mount=type=cache,target=/go/pkg/mod \
     n3x-plugin add github.com/giustech/n3x-plugin-ratelimit@v1.0.0
-RUN --mount=type=secret,id=git_auth --mount=type=cache,target=/go/pkg/mod \
-    n3x-plugin add github.com/acme/n3x-plugin-tenant@v0.4.2
-RUN --mount=type=secret,id=git_auth \
-    --mount=type=cache,target=/go/pkg/mod \
+COPY private-proxy/ /n3x/private-proxy/
+COPY dist/n3x-plugin-tenant-v0.4.2.zip /n3x/private/plugin.zip
+RUN --mount=type=cache,target=/go/pkg/mod \
+    n3x-plugin add --archive /n3x/private/plugin.zip
+RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     n3x-plugin build
 ```
 ```text
-docker buildx build --secret id=git_auth,env=GITHUB_TOKEN -t registry.acme/n3x-sidecar:2026.10 .
+docker buildx build -t registry.acme/n3x-sidecar:2026.10 .
 ```
 
 **Exemplo de resposta** (stderr, sucesso; as linhas 4 a 9 vêm das FDDs 21 a 24 e são ilustrativas)
@@ -448,7 +448,7 @@ n3x-plugin build --log-format json
 
 | Código | Cenário | Exit | Emitido por | Regras (`rule`) | Como resolver (texto padrão) |
 | --- | --- | --- | --- | --- | --- |
-| `N3X-B001` | Módulo não encontrado, sem acesso, rede ou proxy indisponível | 2 | `add` (FDD 19), passo 2 | `not_found`, `no_access`, `network`, `not_in_sumdb`, `proxy_off`, `package_missing`, `go_error` | confira caminho e tag; repositório privado: `ARG GOPRIVATE` e secret `git_auth` nas linhas `add` e `build` |
+| `N3X-B001` | Módulo não encontrado, sem acesso, rede ou proxy indisponível | 2 | `add` (FDD 19), passo 2 | `not_found`, `no_access`, `network`, `not_in_sumdb`, `proxy_off`, `package_missing`, `go_error` | confira caminho e tag; plugin privado: copie um ZIP de módulo Go e use `n3x-plugin add --archive`; inclua as dependências privadas transitivas na fonte local |
 | `N3X-B002` | Repositório fora da estrutura | 2 | `add` (FDD 19) | `manifest_missing`, `half_folder_missing` | crie o que falta e publique nova tag |
 | `N3X-B003` | `n3x-plugin.yaml` inválido | 2 | `add` (FDD 19) | regras da FDD 01, `version_mismatch` | corrija os campos listados e publique nova tag |
 | `N3X-B004` | Plugin incompatível com o SDK ou com o runtime da imagem (mostra a versão exigida e a disponível) | 3 | `add` (`sdk_range`), passo 3 | `sdk_range`, `sdk_gomod`, `sdk_major`, `runtime_gomod`, `runtime_major`, `envoy_sdk_gomod` | use uma imagem de build com a versão exigida, ou uma versão do plugin compatível com esta imagem |
@@ -462,7 +462,7 @@ n3x-plugin build --log-format json
 | `N3X-B012` | Falha no teste de carga do `.so` | 6 | passo 7 (FDD 23) | definidas na FDD 23 | veja o log do Envoy citado |
 | `N3X-B013` | Falha ao gravar o manifesto | 7 | passos 8 e 9 (FDD 22) | definidas na FDD 22 | abra uma issue com o log |
 | `N3X-B014` | Config do plugin sem schema válido (gerador de schema falhou) | 5 | passo 5 (FDD 21; pedido da FDD 02) | regras do gerador da FDD 02 (`unsupported_type`, `tag_*`, `default_invalid` e outras) | corrija a struct de config e as tags `n3x`; rode `go test` com o `sdktest` |
-| `N3X-B015` | Checksum divergente: o conteúdo baixado não confere com o `go.sum`, com o `sum.golang.org` ou com o hash gravado pelo `add` | 2 | `add` (no lugar do `N3X-B001` `checksum` da FDD 19), passo 2 | `checksum`, `workspace_sum` | não use esta versão; a tag foi republicada ou adulterada; peça uma tag nova ao autor |
+| `N3X-B015` | Checksum divergente: o conteúdo baixado não confere com o `go.sum`, com o `sum.golang.org` ou com o hash gravado pelo `add` | 2 | `add` (no lugar do `N3X-B001` `checksum` da FDD 19), passo 2 | `checksum`, `workspace_sum`, `archive_sha256` | não use esta versão; a tag foi republicada ou adulterada; peça uma tag nova ao autor; com `--archive`, confira o ZIP e o `--sha256` informado |
 | `N3X-B016` | Plugin ou dependência exige Go mais novo que o da imagem | 3 | passo 2 e passo 3 (e o `add`, se a FDD 19 aceitar o pedido) | `go_version` | use uma imagem de build com o Go exigido, ou uma versão do plugin que aceite o Go desta imagem |
 
   - Os três últimos são novos (hipótese de número e de categoria): `N3X-B014` cai em 5 porque o passo 5 é geração de código, parte da compilação; `N3X-B015` cai em 2 porque é falha de obtenção de módulo, com remédio diferente do `N3X-B001` (segurança, não acesso); `N3X-B016` cai em 3 porque é incompatibilidade com a imagem, não falha de rede
@@ -482,7 +482,7 @@ Catálogo de avisos (nunca mudam o exit code; âncora `#aviso-<regra>`):
 | `pinned_bypass` | 2 | `GOPRIVATE` ou `GONOPROXY` cobrem um módulo fixado pela imagem, que então sai do proxy em arquivo e precisa de rede |
 | `dependency_upgraded` | 3 | dependência da imagem selecionada em versão maior por causa de um plugin |
 | `depends_missing`, `depends_no_controller`, `depends_cycle` | 3 | só na `sidecar-builder` (na `controller-builder` são `N3X-B006`) |
-| `core_implicit`, `undeclared_half_folder` | `add` | FDD 19 |
+| `core_implicit`, `undeclared_half_folder`, `archive_unverified` | `add` | FDD 19 |
 | `vuln`, `deprecated_api` | 4 | FDD 24 |
 | outros | 5 a 9 | por adição, nas FDDs 21 a 23 (ex.: `load_test_skipped`, pedido à FDD 23) |
 
@@ -797,8 +797,6 @@ erro N3X-B009: agent/stream.go:42:2: go cru fora de s.Go ou env.Background [raw_
       BuildDir      = "/n3x/build"
       BuildModule   = "n3x.local/build"
       PinnedDir     = "/usr/share/n3x/pinned" // proxy/, go.sum, modules.txt
-      SecretPath    = "/run/secrets/git_auth"
-      MaxSecretSize = 4 << 10
       StepTimeout   = 300 * time.Second
       RetryDelay    = 2 * time.Second
       WaitDelay     = 5 * time.Second
@@ -980,12 +978,14 @@ require (
 
 ---
 
-**Contrato 10: secret `git_auth`, ambiente do `go` e helper `n3x-plugin git-credential`**
-- Tipo: Docker BuildKit (secret e `ARG`) e CLI interna (helper do git)
+**Contrato 10: ambiente do `go` e fontes locais de módulos privados**
+- Tipo: Docker BuildKit (`ARG`, `COPY` e `--mount=type=cache`) e resolvedor Go interno
 - Assinatura/Rota:
   ```text
-  RUN --mount=type=secret,id=git_auth n3x-plugin add|build ...
-  n3x-plugin git-credential get|store|erase      (chamado só pelo git; oculto na ajuda)
+  COPY private-proxy/ /n3x/private-proxy/
+  COPY dist/plugin-v1.2.3.zip /n3x/private/plugin.zip
+  RUN n3x-plugin add --archive /n3x/private/plugin.zip
+  RUN n3x-plugin build
   ```
   ```go
   package resolve
@@ -995,56 +995,25 @@ require (
   const (
       ModeAdd     Mode = iota + 1 // add: GOFLAGS vazio
       ModeResolve                 // passo 2: GOFLAGS=-mod=mod
-      ModeOffline                 // etapas 4 a 6: GOPROXY=off e GOFLAGS=-mod=readonly, sem helper
+      ModeOffline                 // etapas 4 a 6: GOPROXY=off e GOFLAGS=-mod=readonly
   )
 
   type Env struct{ /* ... */ }
 
   func NewEnv(environ []string, mode Mode) (Env, []report.Warning)
-  func (e Env) Vars() []string          // ambiente completo do processo filho
-  func (e Env) HasSecret() bool
+  func (e Env) Vars() []string
   func (e Env) Masker() *report.Masker
   ```
 - Método: n/a
-- Semântica de status/headers:
-  - **Lista de permissão:** o processo `go` recebe só estas variáveis do ambiente do `RUN` (vindas de `ARG` ou `ENV`): `PATH`, `HOME`, `TMPDIR`, `GOPROXY`, `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, `GOSUMDB`, `GOINSECURE`, `GOMODCACHE`, `GOCACHE`, `GOAUTH`, `NETRC`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (e as versões em minúsculas), `SSL_CERT_FILE` e `SSL_CERT_DIR`. Nenhuma outra passa, então `GIT_TRACE`, `GIT_CURL_VERBOSE` e `GODEBUG` do operador não chegam ao `go` nem ao git (hipótese)
-  - **Valores fixos:** `GOWORK=off`, `GOTOOLCHAIN=local`, `GOENV=off`, `GOFLAGS` pelo modo, `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`. `GOFLAGS` do operador é substituído, com o aviso `goflags_ignored`
-  - **`GOPROXY` efetivo:** `file:///usr/share/n3x/pinned/proxy,` seguido do valor do operador (padrão `https://proxy.golang.org,direct`). Com a vírgula, o `go` passa ao próximo só quando o proxy em arquivo responde "não encontrado". `GOPRIVATE` ou `GONOPROXY` que cubram um módulo fixado tiram esse módulo do proxy em arquivo: aviso `pinned_bypass`
-  - **Secret `git_auth`:** se `/run/secrets/git_auth` existe e não está vazio, o ambiente ganha `GIT_CONFIG_COUNT=2`, `GIT_CONFIG_KEY_0=credential.helper` com valor vazio (zera os helpers) e `GIT_CONFIG_KEY_1=credential.https://github.com.helper` com `!<caminho absoluto do n3x-plugin na imagem> git-credential` (ex.: `/usr/local/bin/n3x-plugin`, fixado pelo Dockerfile da imagem, FDDs 21 e 46). O token nunca entra em variável de ambiente, argumento, arquivo ou URL; só o helper o lê, na hora, e o entrega ao git por pipe
-  - **Helper:** `get` lê os atributos do stdin; responde só se `protocol=https` e `host=github.com`, com `username=x-access-token` e `password=<conteúdo do arquivo sem a quebra de linha final>`; para outro host, não responde nada. `store` e `erase` não fazem nada. Arquivo maior que 4 KiB, vazio ou ilegível: não responde. O helper não loga e sai com 0 sempre, para não vazar motivo
-  - **Só na resolução:** o helper entra no ambiente só no `add` e no passo 2 (`ModeAdd` e `ModeResolve`). Nas etapas 4 a 6 (`ModeOffline`) não há helper nem rede de módulos. O arquivo continua montado durante a linha `RUN` inteira (limite do BuildKit), e a análise estática da FDD 24 impede que código de plugin o leia nas etapas 5 e 7 (risco tratado na seção 10)
-  - **Fora da v1:** credencial para outros hosts git e para proxies com autenticação; o operador pode montar o próprio `.netrc` (`NETRC` e `GOAUTH` passam pela lista), sem garantia de mascaramento pelo N3X
-
-**Exemplo de requisição** (o que o git manda ao helper)
-```text
-protocol=https
-host=github.com
-path=acme/n3x-plugin-tenant.git
-```
-
-**Exemplo de resposta** (o que o helper devolve; o token aparece aqui só como marcador)
-```text
-username=x-access-token
-password=<conteúdo de /run/secrets/git_auth>
-```
-
-Ambiente do processo `go` no passo 2 (trecho, para `ARG GOPRIVATE=github.com/acme/*`):
-```text
-GOPROXY=file:///usr/share/n3x/pinned/proxy,https://proxy.golang.org,direct
-GOPRIVATE=github.com/acme/*
-GOWORK=off
-GOTOOLCHAIN=local
-GOENV=off
-GOFLAGS=-mod=mod
-GIT_TERMINAL_PROMPT=0
-GIT_CONFIG_NOSYSTEM=1
-GIT_CONFIG_GLOBAL=/dev/null
-GIT_CONFIG_COUNT=2
-GIT_CONFIG_KEY_0=credential.helper
-GIT_CONFIG_VALUE_0=
-GIT_CONFIG_KEY_1=credential.https://github.com.helper
-GIT_CONFIG_VALUE_1=!/usr/local/bin/n3x-plugin git-credential
-```
+- Semântica:
+  - **Sem credenciais:** o builder não lê `git_auth`, não configura helper Git e não recebe token em variável, argumento, arquivo ou montagem BuildKit. O operador obtém os arquivos privados fora do build e os inclui no contexto.
+  - **ZIP de módulo:** `n3x-plugin add --archive <caminho>` aceita ZIP no formato de módulo Go, cujo prefixo interno identifica o módulo e a versão. Valida o caminho, a versão, o `go.mod`, o `n3x-plugin.yaml` e o hash dos arquivos; grava no workspace a identidade e os hashes calculados. O detalhe da CLI pertence à FDD 19 (BLD-01).
+  - **Dependências privadas transitivas:** precisam estar presentes na fonte local de módulos copiada para `/n3x/private-proxy/`; a resolução falha com `N3X-B001` se algum módulo privado necessário estiver ausente e não tenta buscá-lo em proxy público ou VCS.
+  - **Lista de permissão:** o processo `go` recebe só estas variáveis do ambiente do `RUN`: `PATH`, `HOME`, `TMPDIR`, `GOPROXY`, `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, `GOSUMDB`, `GOINSECURE`, `GOMODCACHE`, `GOCACHE`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (e as versões em minúsculas), `SSL_CERT_FILE` e `SSL_CERT_DIR`. Nenhuma variável de credencial passa ao `go` ou ao Git.
+  - **Valores fixos:** `GOWORK=off`, `GOTOOLCHAIN=local`, `GOENV=off`, `GOFLAGS` pelo modo. `GOFLAGS` do operador é substituído, com o aviso `goflags_ignored`.
+  - **Fontes de módulos:** módulos fixados pela imagem vêm de `file:///usr/share/n3x/pinned/proxy`; módulos privados vêm da fonte local copiada. Módulos públicos podem vir do `GOPROXY` do operador (padrão `https://proxy.golang.org,direct`). A resolução nunca busca módulos privados na rede; prefixos privados e comportamento de fallback são definidos por configuração da fonte local.
+  - **Integridade e confidencialidade:** `go.sum` e os hashes do workspace validam que o conteúdo usado no build corresponde ao conteúdo registrado no `add`. Os ZIPs privados e a fonte local são código confidencial, não credenciais; camadas e cache intermediários do estágio devem ser protegidos pelo operador.
+  - **Reprodutibilidade do contexto:** o mesmo conjunto de ZIPs locais e a mesma configuração de proxy devem produzir os mesmos hashes e a mesma lista de módulos resolvidos.
 
 ---
 
@@ -1099,7 +1068,7 @@ erro: workspace /n3x/work inválido: plugins[1].manifest não decodifica com o S
 ```
 
 **Estratégias de resiliência**
-- **Timeout:** 300 s para o passo 2 inteiro (hipótese), aplicado a cada processo filho com `exec.CommandContext` e `WaitDelay` de 5 s; passos 1 e 3 não fazem I/O de rede e não têm prazo próprio. O helper de credencial lê um arquivo local e responde em milissegundos
+- **Timeout:** 300 s para o passo 2 inteiro (hipótese), aplicado a cada processo filho com `exec.CommandContext` e `WaitDelay` de 5 s; passos 1 e 3 não fazem I/O de rede e não têm prazo próprio.
 - **Retry:** uma nova tentativa da chamada do `go`, depois de 2 s, só quando algum erro classificado é `network`, dentro do prazo total. `not_found`, `no_access`, `not_in_sumdb`, `proxy_off`, `checksum` e `go_version` nunca são repetidos
 - **Backoff e circuit breaker:** não se aplicam a um comando de vida curta, rodado uma vez por `docker build`
 - **Proxy em arquivo da imagem:** os módulos fixados (runtime, SDK, core e o fecho deles) não dependem de rede, o que reduz a superfície de falha do passo 2 aos módulos dos plugins
@@ -1108,12 +1077,12 @@ erro: workspace /n3x/work inválido: plugins[1].manifest não decodifica com o S
 - Não há fallback silencioso: o build nunca troca a versão de um módulo, nunca usa `replace`, nunca ignora checksum, nunca continua para a etapa seguinte com problema e nunca escreve artefato parcial em `/out`
 - Status `candidate` ou `deprecated` do alvo e dependência compartilhada atualizada só geram aviso, porque não mudam o que é compilado nem quebram o contrato
 - `depends_on` na `sidecar-builder` só gera aviso, porque a dependência é da metade de controller e o FR-006 permite listas diferentes
-- Sem o secret, o acesso anônimo é o comportamento normal para módulos públicos
+- Plugins públicos são resolvidos anonimamente; plugins privados são aceitos apenas pelos arquivos locais validados
 
 **Invariantes**
 - Depois de um passo 3 sem problemas, a lista de build tem exatamente um módulo de cada família fixada, na versão da imagem
 - Toda saída do `n3x-plugin` passa pelo relator e pelo mascarador; nenhum pacote escreve direto no stderr ou no stdout
-- O valor do secret nunca está em variável de ambiente, argumento, arquivo gravado, log ou mensagem
+- Nenhum token é recebido, armazenado ou impresso pelo builder
 - O passo 3 é função pura: mesma entrada, mesma lista de problemas na mesma ordem
 - O exit code é sempre um dos oito valores da tabela; aviso nunca muda o exit code
 - Todo `Problem` emitido tem código do catálogo e regra declarada para o código (modo estrito nos testes)
@@ -1133,14 +1102,14 @@ erro: workspace /n3x/work inválido: plugins[1].manifest não decodifica com o S
 - Uma linha ou evento `step` por etapa executada; um evento por problema e por aviso; um `summary` no fim, também em falha
 - Campos essenciais: `ts`, `level`, `msg`, `cmd`, `step`, `code`, `status`, `duration_ms`, `rule`, `plugin_id`, `plugin_module`, `plugin_version`, `path`, `detail`, `fix`, `doc`, `exit_code`
 - **Cardinalidade:** não há agregação; o volume é limitado a 100 problemas por etapa e 1 KiB por detalhe
-- **Proteção de dados:** o mascarador troca o valor do secret (e as formas base64 e URL-escape), `usuário:senha@` de URL e o caminho absoluto do cache de módulos; o ambiente dos processos filhos é por lista de permissão. O builder não lê `n3x.yaml` nem a chave AES
-- **Teste de varredura (canário):** com o token `n3x-canary-git-auth-<aleatório>` em `/run/secrets/git_auth`, o teste roda `add` e `build` em sucesso e nas falhas `no_access`, `not_found` e `network` contra um servidor git HTTP falso que exige autenticação, e confere 0 ocorrências do canário (texto puro, base64 e URL-escape) em stdout, stderr (texto e JSON), em todos os arquivos de `/n3x/work`, `/n3x/build` e `/out`, e no ambiente de todo processo filho (registrado por um `exec` falso). Na CI com BuildKit, a mesma varredura roda sobre o `docker image save` do estágio de build
+- **Proteção de dados:** o mascarador troca credenciais em URLs e o caminho absoluto do cache de módulos; o ambiente dos processos filhos é por lista de permissão. O builder não recebe token, não lê `n3x.yaml` nem a chave AES. Os ZIPs e o proxy local contêm código privado e são tratados como conteúdo confidencial no contexto e no cache do estágio.
+- **Teste dos arquivos privados:** um ZIP de módulo Go e uma fonte local de dependências privadas são copiados pelo Dockerfile; `add --archive` e o `build` os consomem sem token, sem executar Git e sem requisitar módulos privados a proxies públicos ou VCS. O teste confirma os hashes gravados no workspace e no `go.sum` de build.
 
 **Tracing**
 - Sem tracing (ADR-009 de plataforma). Não há spans
 
 **Dashboards e alertas**
-- Na CI do `n3x-builder`: falha bloqueante do check "catálogo de erros" (`docs/erros.md` desatualizado ou código sem teste de cenário); falha bloqueante do teste de canário; job dos cenários de falha `N3X-B001` a `N3X-B016` obrigatório em todo PR (HLD de plataforma, "Build e carga do `.so`")
+- Na CI do `n3x-builder`: falha bloqueante do check "catálogo de erros" (`docs/erros.md` desatualizado ou código sem teste de cenário); falha bloqueante dos testes de arquivos privados; job dos cenários de falha `N3X-B001` a `N3X-B016` obrigatório em todo PR (HLD de plataforma, "Build e carga do `.so`")
 - Para o operador (documentado na FDD 47): tratar exit 1 como "ambiente ou ferramenta", 2 como "acesso ou rede", 3 a 7 como "plugin ou combinação de versões"; alertar no próprio CI por `level=error` com `code` em `N3X-B015` (possível adulteração de módulo)
 
 ---
@@ -1150,29 +1119,28 @@ erro: workspace /n3x/work inválido: plugins[1].manifest não decodifica com o S
 | Componente | Versão mínima | Observações |
 | --- | --- | --- |
 | Go | 1.26 | Toolchain do `n3x-plugin` e das imagens (ADR-021 do `n3x-sdk`); usa `go list -json=campos`, `go mod download -json`, `go mod graph`, `GOTOOLCHAIN=local` e o texto de erro `requires go >=` |
-| git | 2.31 | `GIT_CONFIG_COUNT` e helper por variável de ambiente (hipótese; pedido às FDDs 21 e 46) |
 | `github.com/giustech/n3x-sdk` | v0.1.0 (marco M1) | `plugin.ReadSDKRange`, `SDKRange.Contains`, `DecodeManifest`, `CheckNamespace`, `ID.MetricPrefix`, `ID.GRPCPackage`, `FieldErrors` (FDD 01), `yamlconv.ToJSON` (FDD 01), `schemagen` como raiz de resolução (FDD 02); a versão compilada no `n3x-plugin` é a mesma do `sdk` de `builder.yaml` (FDD 19) |
 | `golang.org/x/mod` | a fixada no `go.mod` do `n3x-builder` (a mesma da FDD 19) | `module.SplitPathVersion`, `semver.Compare`, `modfile` para gravar e ler `go.mod` |
 | FDD 19 (BLD-01) | mesma sessão S14 | `internal/catalog`, `internal/image`, `internal/workspace`, `/etc/n3x/builder.yaml`, `/etc/n3x/target.yaml` |
 | Imagem de build (FDDs 21 e 46) | n/a | `/usr/share/n3x/pinned/` (proxy em arquivo, `go.sum`, `modules.txt`) e git 2.31 (hipótese) |
-| Docker com BuildKit | `# syntax=docker/dockerfile:1` | `--mount=type=secret,id=git_auth` e `--mount=type=cache` |
-| Go module proxy e `sum.golang.org` | n/a | Rede só no `add` e no passo 2; `GOPROXY`, `GOPRIVATE` e demais por `ARG` |
+| Docker com BuildKit | `# syntax=docker/dockerfile:1` | `COPY` dos arquivos privados e `--mount=type=cache` |
+| Go module proxy e `sum.golang.org` | n/a | Rede para módulos públicos no `add` e no passo 2; módulos privados vêm da fonte local; `GOPROXY`, `GOPRIVATE` e demais por `ARG` |
 
 **Garantias de compatibilidade**
-- Códigos `N3X-Bxxx` nunca mudam de significado nem de exit code; novos só por adição (ADR-006). Esta FDD acrescenta `N3X-B014`, `N3X-B015` e `N3X-B016` (reflexo pendente no ADR-006, no HLD e no FR-015 do PRD, que citam só até `N3X-B013`)
+- Códigos `N3X-Bxxx` nunca mudam de significado nem de exit code; novos só por adição (ADR-006). Esta FDD acrescenta `N3X-B014`, `N3X-B015` e `N3X-B016` (refletidos no ADR-006, no HLD e no FR-015 do PRD)
 - Regras (`rule`) estáveis na major do builder; regra nova entra em minor, dentro do significado do código
 - Prefixos do texto (`[n/9]`, `erro N3X-Bxxx:`, `erro:`, `aviso <regra>:`, `como resolver:`, `doc:`, `resumo:`) estáveis na major; o resto do texto pode mudar em patch
 - Evento JSON: campos e eventos novos só por adição; valores novos de `status` só em major; schema publicado em `docs/build-events.schema.json`
 - Âncoras de `docs/erros.md` estáveis para sempre; o link aponta para `main`
 - Versões fixadas: a regra "selecionada igual à da imagem" vale para todas as imagens de build da major 1; relaxar (ex.: aceitar patch maior) seria mudança compatível numa minor
-- O `add` e o `build` da mesma imagem compartilham ambiente, helper, relator e funções de checagem; não há leitura de workspace entre versões de imagem (FDD 19)
+- O `add` e o `build` da mesma imagem compartilham ambiente, resolução local, relator e funções de checagem; não há leitura de workspace entre versões de imagem (FDD 19)
 
 ---
 
 ### 9. Critérios de aceite técnicos
 
 - **Um teste por cenário**, com plugins de `testdata/` servidos por um `GOPROXY=file://` de teste, uma imagem falsa (`builder.yaml`, alvo e `pinned/` de teste) e, onde preciso, um proxy HTTP e um servidor git falsos; cada teste confere código, regra, exit code, linha "como resolver" e link, e que `/out` não foi escrito:
-  - `N3X-B001`: plugin inexistente (`not_found`); proxy que responde 403 e git que pede credencial sem o secret (`no_access`); proxy que não responde, com prazo reduzido no teste (`network`, com uma nova tentativa registrada em `retried`); módulo privado sem `GOPRIVATE` contra um `sum.golang.org` falso que responde 404 (`not_in_sumdb`); `GOPROXY=off` (`proxy_off`)
+  - `N3X-B001`: plugin inexistente (`not_found`); tentativa de buscar plugin privado por referência remota sem credencial (`no_access`); ZIP local inválido ou fonte privada transitiva ausente (`package_missing`); proxy público que não responde (`network`, com uma nova tentativa registrada em `retried`); módulo privado remoto sem `GOPRIVATE` contra um `sum.golang.org` falso que responde 404 (`not_in_sumdb`); `GOPROXY=off` (`proxy_off`)
   - `N3X-B015`: `.zip` alterado no proxy de teste depois do `add` (`workspace_sum`); `go.sum` com hash adulterado (`checksum`)
   - `N3X-B016`: plugin com `go 1.99` no `go.mod`; dependência transitiva com `go 1.99`
   - `N3X-B004`: faixa `>=9.0.0 <10.0.0` (`sdk_range`, mostra a faixa e `1.2.0`); plugin que exige o SDK `v1.4.0` com a imagem em `v1.2.0`, direto e por uma dependência intermediária, com a cadeia completa no `chain` (`sdk_gomod`, L-57); plugin que exige `n3x-sdk/v2` (`sdk_major`); dependência que exige o runtime mais novo (`runtime_gomod`)
@@ -1188,7 +1156,7 @@ erro: workspace /n3x/work inválido: plugins[1].manifest não decodifica com o S
 - **Formato:** golden do texto e do JSON para sucesso, falha no passo 2, falha no passo 3 e uso; todo evento JSON valida contra `docs/build-events.schema.json`; todo evento tem os seis campos de base
 - **Resumo:** é o último bloco do stderr em sucesso e em falha; em falha antes do passo 9, `artifact` é `null` e o texto diz "nenhum"
 - **Catálogo:** `go generate ./internal/report` não muda `docs/erros.md` na CI; existem as âncoras `#n3x-b001` a `#n3x-b016`, `#erros-de-uso` e uma por aviso; todos os testes rodam o relator em modo estrito; um teste falha se algum código do catálogo não tiver teste de cenário
-- **Segredo:** teste de canário da seção 7 com 0 ocorrências em todas as saídas, arquivos, ambientes e na camada; o helper responde para `host=github.com` e `protocol=https` e não responde para `host=example.com` nem para `protocol=http`; `GIT_CURL_VERBOSE=1` e `GIT_TRACE=1` no ambiente do `RUN` não chegam ao processo filho
+- **Arquivos privados:** ZIP canônico de módulo importado por `add --archive` confere módulo, versão, manifesto e hash; o build usa a versão e os hashes registrados; dependência privada transitiva presente na fonte local resolve sem rede; dependência ausente falha sem consultar proxy público ou VCS. Nenhum comando nem processo filho recebe token GitHub.
 - **Offline:** com `GOPROXY=off` e workspace vazio, o passo 2 termina com sucesso usando só `/usr/share/n3x/pinned` e com um cache de módulos vazio montado em `/go/pkg/mod`
 - **Sem rede depois do passo 2:** com a rede do teste cortada depois do passo 2, as etapas 4 a 6 da imagem de desenvolvimento (FDD 21) terminam (critério compartilhado com as FDDs 21 e 24)
 - **Classificação:** um teste golden por linha da tabela do contrato 6, com o texto real do Go da imagem; fuzzing de `Classify` e do `Masker` por 5 minutos na CI noturna sem panic, e propriedade "saída do `Masker` nunca contém o segredo" sobre o corpus (hipótese de duração)
@@ -1227,24 +1195,15 @@ erro: workspace /n3x/work inválido: plugins[1].manifest não decodifica com o S
     - Regra de fallback `go_error` com o texto mascarado do `go`, que ainda orienta o operador
 - **Plano de contingência:** patch do builder com o padrão novo
 
-### Código de plugin lê o secret montado durante o build
+### Origem e confidencialidade de módulos privados fornecidos como arquivos
 
-- **Probabilidade:** baixa
-- **Impacto:** token do GitHub do operador exfiltrado por um plugin malicioso, no passo 5 (programa auxiliar do schema) ou no 7 (teste de carga), porque o BuildKit mantém o arquivo montado durante a linha `RUN` inteira
+- **Probabilidade:** depende do processo do operador para obter e revisar os ZIPs
+- **Impacto:** ZIP adulterado antes de entrar no contexto pode ser aceito como a versão privada pretendida; ZIP ou fonte local também podem vazar por contexto, cache ou camadas intermediárias
 - **Mitigação:**
-    - Helper e rede de módulos só no passo 2 e no `add`; etapas seguintes sem variável que aponte para o secret
-    - Análise estática (FDD 24) recusa `init()` e inicializadores de pacote com efeito colateral, que são o único código de plugin executado nos passos 5 e 7 (pedido à FDD 24)
-    - Guia do operador (FDD 47): usar token só de leitura, com escopo mínimo e de vida curta
-- **Plano de contingência:** dividir o build em duas linhas, uma com o secret só para resolver (`n3x-plugin build --resolve-only`) e outra sem o secret, numa minor do builder (hipótese)
-
-### Segredo vaza em mensagem do `go` ou do git
-
-- **Probabilidade:** baixa
-- **Impacto:** token no log da CI do operador
-- **Mitigação:**
-    - Token só no helper, nunca em ambiente, argumento ou URL; `GIT_TERMINAL_PROMPT=0`; ambiente por lista de permissão sem `GIT_TRACE` nem `GIT_CURL_VERBOSE`
-    - Mascarador central no relator, com as formas base64 e URL-escape; teste de canário em sucesso e em falha
-- **Plano de contingência:** patch com mascaramento reforçado; orientar a revogação do token
+    - O ZIP precisa seguir o formato canônico de módulo Go; o `add --archive` valida módulo, versão e manifesto, calcula o `h1` e grava os hashes para detectar divergência entre `add` e `build`
+    - O operador obtém e revisa os artefatos privados antes de incluí-los no contexto e protege o contexto e o cache de build como código confidencial
+    - Decisão aprovada na clarificação: `add --archive --sha256 <hex>` é opcional; informado e divergente, `N3X-B015` (`archive_sha256`); ausente, aviso `archive_unverified` (contrato na FDD 19, BLD-01)
+- **Plano de contingência:** se uma versão futura exigir autenticação de origem, tornar o `--sha256` obrigatório, com o hash vindo de configuração revisada ou outro canal confiável independente do arquivo; não inferir autoria apenas do `h1` calculado pelo builder
 
 ### Plugin atualiza dependência compartilhada e quebra o runtime
 

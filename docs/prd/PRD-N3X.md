@@ -388,6 +388,7 @@ O SDK define as interfaces que a metade de proxy de um plugin implementa para ro
 - Plugin que importa o SDK do Envoy ou usa cgo: o build recusa
 - Plugin que usa a conexão com o controller durante uma requisição: o SDK devolve erro na hora, sem esperar
 - Plugin que importa o pacote `secret` do SDK ou usa `context.Background()`: o build recusa
+- Falso positivo nas regras heurísticas de `ctx` (`loop_no_ctx` e `chan_no_ctx`): o autor pode aceitar a exceção por linha `//n3x:allow <regra> <motivo>`, com motivo obrigatório; ela gera um aviso no manifesto. As demais regras não aceitam exceção
 
 **Prioridade:** alta
 
@@ -454,7 +455,7 @@ O repositório `n3x-builder` publica imagens de build por alvo que compilam, den
 
 **Fluxos alternativos e exceções**
 - amd64 e arm64: as imagens de build são multi-arquitetura, via `docker buildx`
-- Plugin em repositório privado: a credencial de acesso entra como secret de build do Docker e não fica na imagem final
+- Plugin em repositório privado: o builder não recebe credencial; o operador copia o ZIP do módulo (formato de módulo Go) e as dependências privadas para o estágio de build e usa `n3x-plugin add --archive`, com `--sha256` opcional. O ZIP é tratado como código confidencial
 - Listas de plugins diferentes no sidecar e no controller: o build passa, mas o controller detecta a diferença pelo manifesto e alerta no painel (FR-006)
 
 **Erros previstos**
@@ -466,7 +467,7 @@ O repositório `n3x-builder` publica imagens de build por alvo que compilam, den
 - `.so` que não carrega no Envoy do alvo (teste de carga): o build falha
 - Imagem de runtime incompatível com a versão do `core/` ou do `host/` do manifesto: o sidecar ou o controller não sobe e diz qual versão usar
 - Vulnerabilidade encontrada pelo `govulncheck`: o build passa, mostra o aviso e grava no manifesto
-- Toda falha do build tem um código estável (`N3X-B001` a `N3X-B013`), uma linha de como resolver e o link para a documentação
+- Toda falha do build tem um código estável (`N3X-B001` a `N3X-B016`), uma linha de como resolver e o link para a documentação
 
 **Prioridade:** alta
 
@@ -680,7 +681,7 @@ O controller depende do Echo v5 (já estável, versão 5.4.0 de 27/09/2026), de 
 Resolvida pelo HLD do `n3x-plugin-core`: na v1 o core guarda tudo em memória, sem banco, com teto de memória (padrão de 128 MiB), retenção de 24 h e estado degradado quando o teto estoura; os usuários de leitura vêm do `n3x.yaml` do controller e a auditoria (FR-010) sai da v1. O banco da v2, que traz a auditoria de volta e permite várias réplicas do controller, continua pendente.
 
 #### Externa: Registro de containers e repositórios
-As imagens `n3x/*` são publicadas no GitHub Container Registry (`ghcr.io/giustech/n3x/*`) e os cinco repositórios ficam no GitHub. O build de plugins precisa de acesso ao Go module proxy e ao GitHub, com secret de build para repositórios privados.
+As imagens `n3x/*` são publicadas no GitHub Container Registry (`ghcr.io/giustech/n3x/*`) e os cinco repositórios ficam no GitHub. O build de plugins públicos precisa de acesso ao Go module proxy e ao GitHub; plugins privados entram por ZIP de módulo Go copiado no build, sem credencial.
 
 #### Externa: Política de ABI do Envoy
 A partir da 1.40, a interface entre o Envoy e os dynamic modules só cresce por adição. O N3X depende dessa promessa para que o `.so` do alvo `envoy-1.40` continue funcionando em cada patch 1.40.x, o que é verificado na CI a cada patch.

@@ -28,7 +28,7 @@ Além disso, o marco M2 precisa de uma imagem de build antes de existirem imagen
 - FDD 46 (BLD-07): publica as imagens a partir do Dockerfile de desenvolvimento e aplica o Dockerfile recomendado (L-59)
 - FDD 47 (SDK-15): guia do operador com o Dockerfile recomendado
 
-**Atores.** Operador (escreve o Dockerfile e roda `docker buildx build`), autor de plugin (corrige código ou tags a partir de `N3X-B010` e `N3X-B014`), mantenedor do builder (mantém imagens, toolchain e catálogo de regras), BuildKit (passa `TARGETARCH`, monta caches e o secret), toolchain da imagem (Go e `zig`), runtimes `core/entry` e `host` (recebem o código gerado), FDDs 22 e 23 (consomem o artefato) e CI do `n3x-builder`.
+**Atores.** Operador (escreve o Dockerfile e roda `docker buildx build`), autor de plugin (corrige código ou tags a partir de `N3X-B010` e `N3X-B014`), mantenedor do builder (mantém imagens, toolchain e catálogo de regras), BuildKit (passa `TARGETARCH` e monta caches), toolchain da imagem (Go e `zig`), runtimes `core/entry` e `host` (recebem o código gerado), FDDs 22 e 23 (consomem o artefato) e CI do `n3x-builder`.
 
 **Limites.** Só os passos 5 e 6, a plataforma de destino e o Dockerfile de desenvolvimento. Não resolve módulos (FDD 20), não analisa código (FDD 24), não grava manifesto nem escreve em `/out` (FDD 22), não compara símbolos nem carrega o `.so` (FDD 23) e não publica imagens (FDD 46). Não acessa rede de módulos. Executa código de plugin em um único lugar: o programa auxiliar do schema, no passo 5.
 
@@ -38,7 +38,7 @@ Além disso, o marco M2 precisa de uma imagem de build antes de existirem imagen
 - O `n3x-sidecar/core` tem uma pré-release com `core/entry` (`Register`, `Core`, `Plugin`, FDD 17); o plugin core tem a `v0.1.0` com `agent.Plugin()` e `controller.Plugin()` (FDD 36)
 - `go build -json` (Go 1.24 ou mais novo) está disponível no Go 1.26 da imagem
 - O spike da fase 0 confirma que `go build -buildmode=c-shared` com `zig cc` gera um `.so` que o Envoy 1.40 carrega, em amd64 e arm64 (itens C-01 a C-05 da seção 8) (hipótese)
-- O operador usa BuildKit (`# syntax=docker/dockerfile:1`), já exigido pela FDD 20 para secret e cache
+- O operador usa BuildKit (`# syntax=docker/dockerfile:1`), já exigido pela FDD 20 para cache e cópia de arquivos locais de módulos privados
 
 **Restrições**
 - `go build -trimpath -ldflags=-buildid=`; código gerado em ordem fixa e formatado com `go/format`; `built_at` fora do hash (ADR-007 do `n3x-builder`)
@@ -63,7 +63,7 @@ Além disso, o marco M2 precisa de uma imagem de build antes de existirem imagen
   - **L-59 fechada aqui:** o Dockerfile recomendado usa `FROM --platform=$BUILDPLATFORM` no estágio de build e `ARG TARGETARCH` antes da linha `build`; o estágio de build sempre roda na arquitetura do host e compila de forma cruzada; o `n3x-plugin build` lê `TARGETARCH` do ambiente (contratos 4 e 8). A FDD 46 aplica nas imagens publicadas e no exemplo da documentação
   - **L-21 aplicada (registrada na FDD 19):** a glibc que limita o toolchain C é `envoy.glibc` do alvo, usada como sufixo do alvo do `zig cc` (`aarch64-linux-gnu.<glibc>`); o valor vem do spike da fase 0
 - Decisão D-11 do README: Dockerfile de desenvolvimento das imagens de build, usado no M2 sem publicação (contrato 9)
-- Pedidos atendidos: FDD 02 (`N3X-B014` e bytes do schema sem reformatar), FDD 09 (módulo de cada plugin no registro do `.so` e do controller), FDD 16 (`go.mod` com `envoy_go_sdk`, conferido no artefato e na imagem), FDD 17 (`main` com ID e módulo, nunca `n3x_dev`), FDD 19 (`BuildTag()`, `envoy_go_sdk`, `TARGETARCH` fora de `archs`, `/etc/n3x/target.yaml` e `/etc/n3x/builder.yaml` no Dockerfile de desenvolvimento), FDD 20 (gerar e compilar em `/n3x/build` com `GOPROXY=off` e `-mod=readonly`, o mesmo `BuildContext` da resolução, regras do `N3X-B014`, `/usr/share/n3x/pinned` e git 2.31 na imagem de desenvolvimento), FDD 24 (regra `typecheck` no `N3X-B010`; ambiente do compilador `CC` e `CGO_*`)
+- Pedidos atendidos: FDD 02 (`N3X-B014` e bytes do schema sem reformatar), FDD 09 (módulo de cada plugin no registro do `.so` e do controller), FDD 16 (`go.mod` com `envoy_go_sdk`, conferido no artefato e na imagem), FDD 17 (`main` com ID e módulo, nunca `n3x_dev`), FDD 19 (`BuildTag()`, `envoy_go_sdk`, `TARGETARCH` fora de `archs`, `/etc/n3x/target.yaml` e `/etc/n3x/builder.yaml` no Dockerfile de desenvolvimento), FDD 20 (gerar e compilar em `/n3x/build` com `GOPROXY=off` e `-mod=readonly`, o mesmo `BuildContext` da resolução, regras do `N3X-B014` e `/usr/share/n3x/pinned`), FDD 24 (regra `typecheck` no `N3X-B010`; ambiente do compilador `CC` e `CGO_*`)
 
 ---
 
@@ -422,7 +422,7 @@ func main() {
 - Semântica de status/headers:
   - **Entradas do auxiliar:** uma `schemagen.Entry` por plugin e por metade do manifesto, em ordem de ID (bytes) e, em cada ID, `proxy` antes de `controller` (FDD 02, contrato 9). Os dois artefatos recebem as duas metades de todos os plugins. Alias da metade: `<alias>_agent` e `<alias>_controller`; únicos porque o alias base é único e os sufixos são fixos
   - **Compilação:** `go build -json -trimpath -buildvcs=false -o bin/schemagen ./cmd/schemagen`, em `/n3x/build`, com `ModeOffline` (FDD 20) e o contexto da máquina de build (`GOOS=linux`, `GOARCH` da imagem, `CGO_ENABLED=0`, sem tags). `-trimpath` deixa a pilha de um panic com caminhos de módulo, usados na atribuição
-  - **Execução isolada (hipótese):** diretório de trabalho novo e vazio (`os.MkdirTemp` em `/n3x/build`); ambiente só com `PATH=/usr/bin:/bin`, `HOME=/nonexistent` e `TMPDIR=<o mesmo diretório>`, sem nenhuma variável do `RUN` (nem `GOPROXY`, `GOPRIVATE` ou `GIT_*`); stdin em `/dev/null`; grupo de processos próprio (`Setpgid`); prazo de 60 s. Não é sandbox: o arquivo do secret continua montado durante a linha `RUN` (risco tratado na seção 10)
+  - **Execução isolada (hipótese):** diretório de trabalho novo e vazio (`os.MkdirTemp` em `/n3x/build`); ambiente só com `PATH=/usr/bin:/bin`, `HOME=/nonexistent` e `TMPDIR=<o mesmo diretório>`, sem variáveis herdadas do `RUN` (nem `GOPROXY`, `GOPRIVATE` ou `GIT_*`); stdin em `/dev/null`; grupo de processos próprio (`Setpgid`); prazo de 60 s. Não é sandbox: o auxiliar executa código dos plugins já fornecidos no workspace, mas não há credencial GitHub disponível no build (decisão aprovada na clarificação da FDD 20).
   - **Prazo:** ao estourar, SIGQUIT no grupo (o runtime do Go despeja as goroutines no stderr), espera de 2 s e SIGKILL. A atribuição usa o primeiro quadro da goroutine principal cujo pacote pertence ao módulo de um plugin
   - **Limites:** stdout até `entradas × plugin.MaxSchemaSize + 64 KiB` (com 256 KiB por schema, o limite que a FDD 02 já impõe a cada um); stderr até 1 MiB; acima disso, o processo é encerrado e o problema é `helper_output` (stdout) ou o stderr é cortado
   - **Saída 0:** o stdout é decodificado com `json.Decoder` em `map[string]map[string]json.RawMessage`; `json.RawMessage` guarda os bytes de cada schema exatamente como o `schemagen` escreveu. Confere: IDs iguais aos da lista, metades iguais às do manifesto, `plugin.ParseSchema` aceita cada schema e o tamanho cabe em `plugin.MaxSchemaSize`. Os mesmos bytes do stdout são gravados em `/n3x/build/schemas.json`
@@ -828,7 +828,7 @@ erro N3X-B010: o compilador foi encerrado por sinal (signal: killed) no pacote g
   - **`FROM --platform=$BUILDPLATFORM` só no estágio de build:** o BuildKit roda esse estágio na arquitetura do host para cada plataforma pedida, então nenhum `RUN` do `n3x-plugin` é emulado; o estágio final usa a imagem de runtime da plataforma de destino e só copia o artefato, o que dispensa QEMU (HLD: "sem QEMU")
   - **`ARG TARGETARCH` depois dos `add`:** os `add` não dependem do destino e ficam iguais para as duas plataformas, então o BuildKit os executa uma vez; a partir do `ARG`, os passos divergem por plataforma
   - **Caches:** `--mount=type=cache,target=/go/pkg/mod` (módulos) e `--mount=type=cache,target=/root/.cache` (build do Go e cache do `zig`); compartilhados entre as plataformas, seguros para uso concorrente (hipótese do cache do `zig`, conferida no spike)
-  - **Secret:** igual à FDD 20 (contrato 10): `--mount=type=secret,id=git_auth` nas linhas `add` de módulo privado e na linha `build`
+  - **Plugins privados:** copiar os ZIPs no formato de módulo Go e eventuais arquivos de proxy local para o contexto do estágio de build; chamar `n3x-plugin add --archive <caminho>` antes do `build`. Nenhum secret ou token é fornecido ao builder (decisão aprovada na clarificação da FDD 20). Tratar contexto, camadas e cache desse estágio como contendo código privado.
   - **Forma antiga ainda aceita:** o Dockerfile do HLD (sem `--platform` e sem `ARG TARGETARCH`) continua compilando; com `--platform linux/arm64` ele roda emulado e mais lento, com o mesmo resultado, e sem `ARG TARGETARCH` gera o aviso `target_arch_implicit`
   - **Controller:** mesma forma, com `controller-builder` e `controller`
 
@@ -839,11 +839,13 @@ FROM --platform=$BUILDPLATFORM ghcr.io/giustech/n3x/sidecar-builder:1.0.0-envoy-
 ARG GOPRIVATE=github.com/acme/*
 RUN --mount=type=cache,target=/go/pkg/mod \
     n3x-plugin add github.com/giustech/n3x-plugin-ratelimit@v1.0.0
-RUN --mount=type=secret,id=git_auth --mount=type=cache,target=/go/pkg/mod \
-    n3x-plugin add github.com/acme/n3x-plugin-tenant@v0.4.2
+COPY dist/n3x-plugin-tenant-v0.4.2.zip /n3x/private/plugin.zip
+COPY private-proxy/ /n3x/private-proxy/
+ENV GOPROXY=file:///n3x/private-proxy,https://proxy.golang.org
+RUN --mount=type=cache,target=/go/pkg/mod \
+    n3x-plugin add --archive /n3x/private/plugin.zip
 ARG TARGETARCH
-RUN --mount=type=secret,id=git_auth \
-    --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache \
     n3x-plugin build
 
@@ -864,7 +866,7 @@ COPY --from=build /out/n3x-controller /usr/local/bin/n3x-controller
 ```
 ```text
 docker buildx build --platform linux/amd64,linux/arm64 \
-  --secret id=git_auth,env=GITHUB_TOKEN -t registry.acme/n3x-sidecar:2026.10 --push .
+  -t registry.acme/n3x-sidecar:2026.10 --push .
 ```
 
 **Exemplo de resposta** (trechos do log do BuildKit num host amd64 sem QEMU)
@@ -895,7 +897,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 - Método: n/a
 - Semântica de status/headers:
   - **Para que serve:** gerar o `.so` do M2 (core mais exemplo, `envoy-1.40`, amd64) e o binário do controller do M3 pelo próprio `n3x-plugin build`, antes das imagens publicadas (FDD 46). Nunca é publicado: a tag local `n3x-dev/...` não tem o prefixo `ghcr.io/giustech` (hipótese de nome)
-  - **Conteúdo da `sidecar-builder`:** Go 1.26 da imagem oficial `golang` (Debian) fixada por digest; `zig` em `/opt/zig`, baixado por versão e conferido por SHA-256; `n3x-plugin` em `/usr/local/bin/n3x-plugin` (caminho fixo pedido pela FDD 20 para o helper de credencial); `/etc/n3x/target.yaml` (cópia byte a byte de `targets/<alvo>.yaml`, modo 0444); `/etc/n3x/builder.yaml` (modo 0444, FDD 19); `/usr/share/n3x/pinned/` com `proxy/`, `go.sum` e `modules.txt` (FDD 20); git 2.31 ou mais novo (conferido no próprio Dockerfile); `/n3x/work` e `/out` vazios; `ENV` com `PATH` do zig, `GOTOOLCHAIN=local` e o cache do zig em `/root/.cache/zig`
+  - **Conteúdo da `sidecar-builder`:** Go 1.26 da imagem oficial `golang` (Debian) fixada por digest; `zig` em `/opt/zig`, baixado por versão e conferido por SHA-256; `n3x-plugin` em `/usr/local/bin/n3x-plugin`; `/etc/n3x/target.yaml` (cópia byte a byte de `targets/<alvo>.yaml`, modo 0444); `/etc/n3x/builder.yaml` (modo 0444, FDD 19); `/usr/share/n3x/pinned/` com `proxy/`, `go.sum` e `modules.txt` (FDD 20); `/n3x/work` e `/out` vazios; `ENV` com `PATH` do zig, `GOTOOLCHAIN=local` e o cache do zig em `/root/.cache/zig`
   - **Conteúdo da `controller-builder`:** o mesmo sem `zig`, sem alvo e com o `pinned` do `host`
   - **Pontos de extensão:** a FDD 22 acrescenta a ferramenta que grava a seção `.n3x_manifest`; a FDD 23 acrescenta o binário do Envoy do alvo. Cada uma edita só a sua linha marcada
   - **Ferramenta `pin` (hipótese de nome e local):** cria o módulo `n3x.local/pinned` com `require` do runtime, do SDK (versão lida da build info do `n3x-plugin`, para valer o invariante da FDD 19: o SDK do `builder.yaml` é o compilado no `n3x-plugin`), do plugin core e, no sidecar, de `envoy_go_sdk` do alvo; um arquivo com imports em branco das raízes (`<runtime>/entry` ou `<runtime>`, `<core>/agent`, `<core>/controller`, `<sdk>/schemagen`); roda `go mod tidy` e `go mod download all`; confere que a versão selecionada de cada módulo fixado é exatamente a pedida e que o `go.mod` do runtime exige o SDK Go do Envoy exatamente em `envoy_go_sdk` (pedido da FDD 16); copia `cache/download` para `<out>/pinned/proxy`, grava `<out>/pinned/go.sum` e `<out>/pinned/modules.txt` (`go list -m all`) e grava `<out>/builder.yaml`. Qualquer divergência sai com código diferente de 0 e falha o build da imagem
@@ -1128,8 +1130,8 @@ target         envoy-1.40 (candidate)
 - **Sem caminho absoluto:** em todas as saídas de texto e JSON dos cenários acima, 0 ocorrências de `/go/pkg/mod/`, `/tmp/go-build`, `/root/.cache` e `/n3x/build/` como prefixo absoluto
 - **Offline:** com a rede do teste cortada depois do passo 2, os passos 5 e 6 terminam (critério compartilhado com as FDDs 20 e 24)
 - **`/out` intocado:** depois de falha no passo 5 ou 6, `/out` fica igual ao anterior; depois de sucesso, os passos 5 e 6 não criaram nada em `/out`
-- **Auxiliar isolado:** o ambiente do processo do auxiliar, registrado por um `exec` falso, é exatamente `PATH`, `HOME` e `TMPDIR`; com o canário `n3x-canary-git-auth-<aleatório>` no ambiente do `RUN`, 0 ocorrências no ambiente do auxiliar e nas saídas (teste da FDD 20 estendido aos passos 5 e 6)
-- **Dockerfile de desenvolvimento:** os alvos `sidecar-builder` e `controller-builder` constroem em amd64 com o build de fumaça offline; `/etc/n3x/target.yaml` é igual byte a byte a `targets/envoy-1.40.yaml` e tem modo 0444; `/etc/n3x/builder.yaml` tem modo 0444 e `sdk` igual ao SDK da build info do `n3x-plugin`; existem `/usr/share/n3x/pinned/proxy`, `go.sum` e `modules.txt`, `/usr/local/bin/n3x-plugin` e git 2.31 ou mais novo; a ferramenta `pin` falha se o `go.mod` do runtime exigir SDK Go do Envoy diferente de `envoy_go_sdk` ou se o MVS subir uma versão fixada
+- **Auxiliar isolado:** o ambiente do processo do auxiliar, registrado por um `exec` falso, é exatamente `PATH`, `HOME` e `TMPDIR`; variáveis definidas no `RUN` não aparecem no ambiente do auxiliar nem nas saídas.
+- **Dockerfile de desenvolvimento:** os alvos `sidecar-builder` e `controller-builder` constroem em amd64 com o build de fumaça offline; `/etc/n3x/target.yaml` é igual byte a byte a `targets/envoy-1.40.yaml` e tem modo 0444; `/etc/n3x/builder.yaml` tem modo 0444 e `sdk` igual ao SDK da build info do `n3x-plugin`; existem `/usr/share/n3x/pinned/proxy`, `go.sum` e `modules.txt`, `/usr/local/bin/n3x-plugin`; a ferramenta `pin` falha se o `go.mod` do runtime exigir SDK Go do Envoy diferente de `envoy_go_sdk` ou se o MVS subir uma versão fixada
 - **M2:** o Dockerfile do contrato 8 com a imagem de desenvolvimento gera o `.so` com core e exemplo em amd64 (critério compartilhado com as FDDs 22, 23 e 29)
 - **Desempenho:** com 5 plugins, num runner amd64 da CI, p95 de 5 execuções: passo 5 em até 5 s e passo 6 em até 20 s com cache quente; até 90 s e 120 s com cache frio; arm64 cruzado em até 1,5 vez o amd64 nativo (hipótese)
 - **Qualidade:** TDD pelos golden e cenários de falha; `go vet` e `go test -race ./internal/generate/... ./internal/compile/... ./images/tools/...` passam; cobertura de linhas de no mínimo 85% (a mesma meta das FDDs 19 e 20); fuzzing de `compile.Classify` e do leitor do stderr do auxiliar por 5 minutos na CI noturna sem panic; relator em modo estrito em todos os testes
@@ -1166,15 +1168,15 @@ target         envoy-1.40 (candidate)
     - glibc do alvo fixada no `zig cc` e conferida nos símbolos (critério de glibc)
 - **Plano de contingência:** recomendar o build em runner arm64 nativo; o `n3x run` falha na subida, antes de receber tráfego (HLD)
 
-### Auxiliar executa código não analisado com o secret montado
+### Auxiliar executa código dos plugins fornecidos localmente
 
 - **Probabilidade:** baixa
-- **Impacto:** a inicialização de pacote da metade que este artefato não compila (não analisada no passo 4) lê `/run/secrets/git_auth` ou trava o build
+- **Impacto:** a inicialização de pacote da metade que este artefato não compila (não analisada no passo 4) executa código no ambiente do build e pode travar o processo ou produzir saída inesperada
 - **Mitigação:**
     - Auxiliar sem o ambiente do `RUN`, em diretório vazio, com prazo e limite de saída (contrato 3)
     - Pedido à FDD 24: aplicar `init_side_effect` e `forbidden_import` também aos pacotes da metade não compilada, porque o passo 5 os executa (I-04)
-    - Guia do operador: token só de leitura e de vida curta (FDDs 20 e 47)
-- **Plano de contingência:** dividir o build em duas linhas `RUN`, com o secret só na resolução (contingência P-05 da FDD 20), ou gerar no auxiliar só os schemas da metade deste artefato numa minor do builder
+- O builder não recebe credencial GitHub; o operador trata ZIPs privados, contexto, camadas e cache como conteúdo confidencial (FDDs 20 e 47). O auxiliar continua limitado por ambiente mínimo, prazo e limite de saída.
+- **Plano de contingência:** gerar no auxiliar só os schemas da metade deste artefato numa minor do builder, se a execução das duas metades se mostrar incompatível com a análise estática ou com o modelo de confiança dos plugins.
 
 ### Operador sem `--platform=$BUILDPLATFORM` ou sem `ARG TARGETARCH`
 

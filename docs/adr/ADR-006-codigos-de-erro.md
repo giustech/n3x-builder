@@ -7,7 +7,8 @@ Data: 2026-10-20
 O PRD lista os cenários de falha do build e pede mensagens claras. Sem código, uma mensagem em texto livre é difícil de buscar, de citar em issue e de tratar na CI do operador.
 
 ## Decisão
-- Cada cenário tem um código fixo, de `N3X-B001` a `N3X-B013`, que nunca muda de significado; códigos novos só por adição
+- Cada cenário tem um código fixo, de `N3X-B001` a `N3X-B016`, que nunca muda de significado; códigos novos só por adição
+- Acrescentados por adição na clarificação das FDDs: `N3X-B014` (schema de config inválido, exit 5), `N3X-B015` (checksum divergente, exit 2) e `N3X-B016` (Go mais novo que o da imagem, exit 3)
 - Cada mensagem traz o código, o motivo, uma linha "como resolver" e o link para `docs/erros.md`
 - Exit code por categoria: 1 uso, 2 resolução, 3 compatibilidade, 4 análise estática, 5 compilação, 6 símbolos ou carga, 7 manifesto
 - O build termina a etapa em que falhou e lista todas as falhas dela

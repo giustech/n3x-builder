@@ -72,7 +72,7 @@ Na entrevista apareceu um ponto que nenhuma fonte tratava: o `.so` só cria a co
 - **Determinismo.** Invariante: a comparação é função pura do `.so` e do índice; mesma entrada, mesmos achados na mesma ordem e o mesmo `verify-symbols.json` byte a byte (100 execuções).
 - **Artefato intocado.** Invariante: o SHA-256 do arquivo `/n3x/build/out/libn3x.so` antes e depois do passo 7 é o mesmo (o teste de carga roda numa cópia).
 - **Mesmo comportamento em todos os alvos.** Invariante: o mesmo bootstrap mínimo, as mesmas regras e os mesmos sinais em `envoy-1.40` e `istio-1.31`, em amd64 e arm64; variante por alvo só por adição (L-30).
-- **Isolamento do teste de carga.** Invariante: o processo do Envoy roda com ambiente montado do zero (sem `N3X_ENVOY_VALIDATE`, sem variáveis do `RUN`, sem o secret), como usuário sem privilégio (UID 17000) quando o ambiente permite, e sem porta TCP. Medida: Envoy falso que despeja ambiente, UID e tentativa de ler `/run/secrets/git_auth`.
+- **Isolamento do teste de carga.** Invariante: o processo do Envoy roda com ambiente montado do zero (sem `N3X_ENVOY_VALIDATE`, sem variáveis do `RUN`), como usuário sem privilégio (UID 17000) quando o ambiente permite, e sem porta TCP. O builder não recebe credenciais (decisão aprovada na clarificação da FDD 20); o isolamento limita o efeito da inicialização de pacote dos plugins sobre o ambiente do build. Medida: Envoy falso que despeja ambiente e UID.
 
 ---
 
@@ -101,7 +101,7 @@ Na entrevista apareceu um ponto que nenhuma fonte tratava: o `.so` só cria a co
 - `envoy --mode validate` com o bootstrap real no `n3x run`: FDD 26 (SID-06)
 - Conferência de alvo, integridade e arquitetura na subida: FDD 25 (SID-05)
 - Checagem estática da versão do ABI no build cruzado: fora da v1 (trade-off aceito no ADR-004: o erro de ABI aparece no `n3x run`, antes do tráfego)
-- Opção para o operador pular o teste de carga num build nativo: fora da v1 (hipótese)
+- Opção para o operador pular o teste de carga num build nativo: fora da v1 (decisão aprovada na clarificação)
 - Assinatura e SBOM: fora da v1 (PRD)
 
 ---
@@ -131,7 +131,7 @@ Na entrevista apareceu um ponto que nenhuma fonte tratava: o `.so` só cria a co
 - **Build cruzado (`plat.Native` falso, por exemplo amd64 compilando arm64):** passos 1 a 5 com o índice da arquitetura de destino (L-60); depois `st.Warn(load_test_skipped)` com `reason: cross_arch`, nota `linux/<arch>, cruzado: só símbolos` e `End`. O teste de carga em arm64 roda na CI nativa do builder para cada imagem, e um erro de ABI aparece no `n3x run`, antes do tráfego (trade-off aceito no ADR-004).
 - **`controller-builder`:** `st.Skip("controller")` logo depois do `Begin`; texto `[7/9] verificando símbolos e carga (controller-builder: sem Envoy) ... pulada`; nenhum arquivo lido (pedido da FDD 20).
 - **`TARGETARCH` ausente:** a FDD 21 usa a arquitetura da imagem (`Implicit: true`, `Native: true`); o teste de carga roda normalmente.
-- **Build emulado (Dockerfile sem `--platform=$BUILDPLATFORM`, estágio arm64 sob QEMU):** `Native` é verdadeiro porque o `n3x-plugin` não detecta emulação (FDD 21); o Envoy roda emulado e mais lento. O prazo de 15 s até o pronto foi escolhido com folga para isso; estourado, `not_ready` traz a dica "use `FROM --platform=$BUILDPLATFORM`" (hipótese).
+- **Build emulado (Dockerfile sem `--platform=$BUILDPLATFORM`, estágio arm64 sob QEMU):** `Native` é verdadeiro porque o `n3x-plugin` não detecta emulação (FDD 21); o Envoy roda emulado e mais lento. O prazo de 15 s até o pronto foi escolhido com folga para isso; estourado, `not_ready` traz a dica "use `FROM --platform=$BUILDPLATFORM`"; sem detecção de emulação (decisão aprovada na clarificação).
 - **Troca de UID indisponível** (`setuid` recusado, por exemplo BuildKit sem usuário 17000 mapeado): o teste roda como o usuário atual, com o aviso `load_test_unsandboxed`; o resultado do teste não muda (hipótese).
 - **`.so` sem manifesto na cópia** (porta `Stager` falhou, por exemplo `objcopy` ausente): erro de uso `internal`, exit 1, porque é defeito da imagem; o problema real do manifesto sai no passo 8 como `N3X-B013`.
 - **Envoy ausente ou não executável, ou de outra arquitetura (ENOEXEC):** erro de uso `image_invalid`, exit 1.
@@ -581,7 +581,7 @@ Regras do `N3X-B011` (exit 6):
   - **Igual em todos os alvos (L-30, hipótese; V-06 e V-09):** um único arquivo, sem nada do Istio (sem pilot-agent, sem xDS) e só com campos estáveis da API v3 presentes no Envoy 1.40 e no Envoy do istio-proxy 1.31: admin e listener em `pipe`, HCM, `DynamicModuleFilter`, router com `direct_response` e `application_log_config`. Não usa overload manager, monitores, clusters nem porta TCP. O binário do `istio/proxyv2` roda com bootstrap estático, sem o pilot-agent. Se um alvo exigir diferença, a variante entra por adição, escolhida pelo ID do alvo, sem mudar este contrato (FDD 49 confirma)
   - **`n3x.yaml` mínimo:** `version: 1`, `service: n3x-load-test`, `app.address: 127.0.0.1:9` (nunca contatado: a rota responde direto) e `runtime.log_level: info`; sem `plugins`, `controller` e `keys`, portanto sem segredo e sem chave AES (FDD 15)
   - **Processo:** `EnvoyPath -c bootstrap.yaml --mode serve --concurrency 1 --disable-hot-restart --log-level info`, sem `--log-format` (FDD 26). Ambiente montado do zero: `PATH=/usr/bin:/bin`, `HOME` e `TMPDIR` em `RunDir`, `ENVOY_DYNAMIC_MODULES_SEARCH_PATH=ModuleDir`, `GODEBUG=cgocheck=0` (FDD 26), `GOMAXPROCS=2` e `GOMEMLIMIT=128MiB` (fixos, para o resultado não depender da máquina; hipótese). Nunca `N3X_ENVOY_VALIDATE` (o teste é em `ModeServe`), nunca variáveis do `RUN` (`GOPROXY`, `GIT_*`, `GOPRIVATE`)
-  - **Usuário e sistema de arquivos** (resposta ao ASSUNTO): roda como UID e GID 17000, o usuário da imagem de runtime `-envoy-1.40` (FDD 28; o `-istio-1.31` usa 1337, e o que importa para a carga é não ser root). Esse usuário não lê `/run/secrets/git_auth` (modo `0400`, dono root, padrão do BuildKit) e só escreve em `RunDir` e em `/tmp`, como a imagem de runtime com raiz somente leitura e `/tmp` em tmpfs. Montar a raiz somente leitura exige privilégio que o `RUN` não tem; a imitação é pelo usuário e pelas permissões (`0444` e `0555` nos arquivos, `0755` dono root nos diretórios). Sem `setuid` disponível: roda como o usuário atual e avisa `load_test_unsandboxed`
+  - **Usuário e sistema de arquivos** (resposta ao ASSUNTO): roda como UID e GID 17000, o usuário da imagem de runtime `-envoy-1.40` (FDD 28; o `-istio-1.31` usa 1337, e o que importa para a carga é não ser root). Esse usuário só escreve em `RunDir` e em `/tmp`, como a imagem de runtime com raiz somente leitura e `/tmp` em tmpfs. Montar a raiz somente leitura exige privilégio que o `RUN` não tem; a imitação é pelo usuário e pelas permissões (`0444` e `0555` nos arquivos, `0755` dono root nos diretórios). Sem `setuid` disponível: roda como o usuário atual e avisa `load_test_unsandboxed`
   - **Sem porta TCP:** admin e entrada em socket Unix; builds paralelos e `RUN --network=none` não interferem
   - **Leitor do log:** linhas de stdout e stderr (até 64 KiB por linha; maiores são cortadas); linha JSON com `component: core` é do `.so` (FDD 16, contrato 10), com `component: envoy` é do Envoy (`application_log_config`); linha que não é JSON é do Envoy antes de ler o bootstrap ou do runtime Go (erros fatais). Toda linha passa pelo `Masker` (FDD 20) e tem `/n3x/build/` trocado por caminho relativo e `/opt/n3x/envoy/` por `$ENVOY_DIR/` antes de ir para o arquivo ou para a mensagem
   - **Sinais de sucesso** (pedido da FDD 16): todos, na ordem do diagrama de estados:
@@ -742,7 +742,7 @@ erro N3X-B011: símbolo ausente no Envoy do alvo (2 problemas)
 
   - **Campos próprios do evento `step`:** `arch`, `native`, `imports`, `exports`, `needed`, `weak_ignored`, `index_sha256` (12 hex), `envoy_image`, `load_test` (`ok`, `failed`, `skipped`), `load_ms`, `ready_ms`, `envoy_exit`, `sandbox` (`uid`, `root` ou vazio)
   - **Nota da linha:** nativo `<i> importados, <e> exportados; carga ok em <d>s`; cruzado `linux/<arch>, cruzado: só símbolos`; falha `linux/<arch>, nativo|cruzado`; pulada `controller-builder: sem Envoy`
-  - **Manifesto:** se `load_test_skipped` entra no campo `warnings` do manifesto é decisão da FDD 22 (pedido; P-06)
+  - **Manifesto:** `load_test_skipped` entra no campo `warnings` do manifesto, com `reason: cross_arch` e `host_arch`; `load_test_unsandboxed` nunca entra (resolvido na FDD 22, contrato 5; P-06 fechado)
 
 **Exemplo de requisição**
 ```text
@@ -973,7 +973,7 @@ build de fumaça: [7/9] verificando símbolos e carga (152 importados, 31 export
 - **Cruzado:** num host amd64, o destino arm64 roda só a comparação com `arm64.json`, emite `load_test_skipped` com `reason: cross_arch` e termina `ok` em até 0,5 s
 - **Classificação:** `Classify` tem um golden por regra do `N3X-B012`, com as mensagens reais do spike (V-04) e com Envoy falso (programa Go em `testdata/fakeenvoy`) para `exited`, `not_ready`, `signal_missing`, `probe_failed`, `stop_timeout` e `stop_failed`; Envoy falso que ignora SIGTERM é morto em 5 s mais 1 s, mais ou menos 0,5 s
 - **Sinais:** Envoy falso que imprime `adapter_loaded` com `capabilities` diferente do catálogo dá `adapter_mismatch` com `field: capabilities`; sem `runtime_started` e com pronto, `signal_missing`
-- **Isolamento:** o Envoy falso despeja ambiente, UID e o resultado de abrir `/run/secrets/git_auth` montado pelo BuildKit: ambiente exatamente o do contrato 4 (sem `N3X_ENVOY_VALIDATE`, `GOPROXY`, `GIT_*`), UID 17000 e `EACCES` no secret; sem `setuid`, aviso `load_test_unsandboxed` e o teste ainda roda
+- **Isolamento:** o Envoy falso despeja ambiente e UID: ambiente exatamente o do contrato 4 (sem `N3X_ENVOY_VALIDATE`, `GOPROXY`, `GIT_*`) e UID 17000; sem `setuid`, aviso `load_test_unsandboxed` e o teste ainda roda
 - **Sem TCP:** durante o teste de carga real, `/proc/net/tcp` e `/proc/net/tcp6` do container não ganham nenhum socket em escuta
 - **Artefato intocado:** SHA-256 de `/n3x/build/out/libn3x.so` igual antes e depois do passo, em 20 execuções
 - **Determinismo:** `verify-symbols.json` byte a byte igual em 100 execuções com a mesma entrada
@@ -1036,15 +1036,15 @@ build de fumaça: [7/9] verificando símbolos e carga (152 importados, 31 export
     - Lista `Optional` por alvo no repositório do builder
 - **Plano de contingência:** derivar `RequiredExports` só do `abi.h`, sem as strings do binário
 
-### Código de plugin lê o secret durante o teste de carga
+### Código de plugin age sobre o ambiente do build durante o teste de carga
 
 - **Probabilidade:** baixa
-- **Impacto:** token do operador exfiltrado pela inicialização de pacote de um plugin malicioso
+- **Impacto:** a inicialização de pacote de um plugin malicioso lê ou altera arquivos do estágio de build, inclusive ZIPs e fontes privadas copiados pelo operador (o builder não tem credencial a vazar)
 - **Mitigação:**
-    - Envoy como UID 17000, sem acesso ao arquivo do secret (`0400`, dono root), e sem variáveis do `RUN`
+    - Envoy como UID 17000 e sem variáveis do `RUN`
     - Análise estática recusa inicialização de pacote com efeito colateral (FDD 24, `init_side_effect`)
     - Pedido à FDD 21: o auxiliar do schema (passo 5) roda com o mesmo UID (I-05)
-- **Plano de contingência:** dividir o build em duas linhas `RUN` (contingência da FDD 20)
+- **Plano de contingência:** orientar o operador a tratar o estágio de build como confidencial (FDD 47)
 
 ### Dependência da porta `Stager` da FDD 22
 

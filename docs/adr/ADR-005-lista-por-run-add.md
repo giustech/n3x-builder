@@ -8,6 +8,7 @@ O sidecar e o controller precisam receber a mesma lista de plugins, escrita em d
 
 ## Decisão
 - A lista de plugins é declarada só com `RUN n3x-plugin add <módulo>@<versão>`, uma linha por plugin, com versão exata
+- Plugin privado usa a forma `RUN n3x-plugin add --archive <zip> [--sha256 <hex>]`, também uma linha por plugin: módulo e versão vêm do prefixo do ZIP no formato de módulo Go e o builder não recebe credencial
 - Não há arquivo de lista na v1
 - A diferença entre as listas do sidecar e do controller continua sendo detectada pelo manifesto e alertada no painel (FR-006)
 

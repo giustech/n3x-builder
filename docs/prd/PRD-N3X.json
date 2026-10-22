@@ -449,7 +449,7 @@
       ],
       "alternative_flows": [
         "amd64 e arm64: as imagens de build são multi-arquitetura, via docker buildx",
-        "Plugin em repositório privado: a credencial de acesso entra como secret de build do Docker e não fica na imagem final",
+        "Plugin em repositório privado: o builder não recebe credencial; o operador copia o ZIP do módulo (formato de módulo Go) e as dependências privadas para o estágio de build e usa n3x-plugin add --archive, com --sha256 opcional. O ZIP é tratado como código confidencial",
         "Listas de plugins diferentes no sidecar e no controller: o build passa, mas o controller detecta a diferença pelo manifesto e alerta no painel (FR-006)"
       ],
       "known_errors": [
@@ -461,7 +461,7 @@
         ".so que não carrega no Envoy do alvo (teste de carga): o build falha",
         "Imagem de runtime incompatível com a versão do core/ ou do host/ do manifesto: o sidecar ou o controller não sobe e diz qual versão usar",
         "Vulnerabilidade encontrada pelo govulncheck: o build passa, mostra o aviso e grava no manifesto",
-        "Toda falha do build tem um código estável (N3X-B001 a N3X-B013), uma linha de como resolver e o link para a documentação"
+        "Toda falha do build tem um código estável (N3X-B001 a N3X-B016), uma linha de como resolver e o link para a documentação"
       ],
       "priority": "high"
     },
@@ -716,7 +716,7 @@
     {
       "type": "external",
       "title": "Registro de containers e repositórios",
-      "description": "As imagens n3x/* são publicadas no GitHub Container Registry (ghcr.io/giustech/n3x/*) e os cinco repositórios ficam no GitHub. O build de plugins precisa de acesso ao Go module proxy e ao GitHub, com secret de build para repositórios privados."
+      "description": "As imagens n3x/* são publicadas no GitHub Container Registry (ghcr.io/giustech/n3x/*) e os cinco repositórios ficam no GitHub. O build de plugins públicos precisa de acesso ao Go module proxy e ao GitHub; plugins privados entram por ZIP de módulo Go copiado no build, sem credencial."
     },
     {
       "type": "external",

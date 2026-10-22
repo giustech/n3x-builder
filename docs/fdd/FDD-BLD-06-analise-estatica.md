@@ -13,7 +13,7 @@ Responsável: Guilherme Giusti
 - o `recover` do executor (FDDs 17 e 18) não cobre goroutine aberta com `go` cru, erro fatal do runtime, `os.Exit`, `log.Fatal` nem código C
 - o isolamento de memória (FDD 04), do token do core (ADR-019) e dos segredos (FDD 03) é por API, não por hardware: `unsafe`, `reflect` sobre tipos do SDK ou escrita em variáveis do SDK contornam o contrato (ADR-005, trade-off)
 - o risco mais crítico do sidecar é o plugin que ignora o `ctx` e deixa goroutines vivas depois do prazo (HLD do `n3x-sidecar`, riscos); a primeira barreira é recusar no build o código bloqueante sem contexto (ADR-006 do `n3x-sidecar`)
-- o secret `git_auth` fica montado durante a linha `RUN n3x-plugin build` inteira, e os passos 5 (programa auxiliar do schema, FDD 02) e 7 (teste de carga, FDD 23) executam a inicialização dos pacotes do plugin (FDD 20, risco "Código de plugin lê o secret")
+- os passos 5 (programa auxiliar do schema, FDD 02) e 7 (teste de carga, FDD 23) executam a inicialização dos pacotes do plugin no ambiente do build; o builder não recebe credenciais (decisão aprovada na clarificação da FDD 20), mas o estágio contém ZIPs e fontes privadas copiados pelo operador
 
 O HLD do `n3x-sdk` define as regras numa tabela de oito linhas, e o HLD do `n3x-builder` diz que elas são aplicadas com `go/analysis`. Nenhum documento define: o algoritmo de cada regra, quais pacotes são analisados, o formato da violação dentro do `N3X-B009`, como o `govulncheck` obtém a base de vulnerabilidades e o que acontece quando ela não responde (L-62), como tratar código gerado pelo `protoc-gen-go` (que usa `unsafe` e `init()`), se existe exceção para falso positivo e como uma regra nova chega aos operadores. Cinco FDDs anteriores (03, 04, 05, 06 e 20) deixaram pedidos de regra para esta.
 
@@ -108,7 +108,7 @@ Quem consome:
 - Arquivos da imagem (binário `govulncheck`, cópia da base, versões fixadas) e meta de duração do build inteiro: FDD 46 (BLD-07)
 - Regras de código sobre dependências de terceiros: fora da v1; só as regras de import e de código nativo valem para o fecho inteiro (seção 5, contrato 3)
 - Proibição de acesso a arquivos do container pelo plugin (ex.: ler o arquivo da chave AES): fora da v1; registrada como risco residual e pedido ao guia (FDD 47)
-- Divisão do `build` em duas linhas `RUN` (secret só na resolução): avaliada aqui e mantida como contingência da FDD 20 (seção 10)
+- Divisão do `build` em duas linhas `RUN` (secret só na resolução): obsoleta, porque não há secret no builder (decisão aprovada na clarificação da FDD 20)
 - Um subcomando para o autor rodar a análise fora do build: fora da v1; o autor roda o `docker build` de teste na CI do plugin (guia, FDD 47)
 
 ---
@@ -122,7 +122,7 @@ Entradas, todas da FDD 20: plugins checados no passo 3 (`check.Result.Plugins`, 
 1. `rep.Begin(4, report.StepAnalysis, "análise estática")`.
 2. **Tarefa paralela do `govulncheck`** (fluxo B) começa agora e corre junto com os itens 3 a 9.
 3. **Fecho.** Em `/n3x/build`, um `go list -e -deps -json=<campos>` com as raízes da metade compilada de cada plugin (`<módulo>/agent/...` na `sidecar-builder`, `<módulo>/controller/...` na `controller-builder`), no contexto de compilação (`GOOS`, `GOARCH`, `CGO_ENABLED` e a tag do alvo), com `GOFLAGS=-mod=readonly` e `GOPROXY=off`. Campos: `ImportPath`, `Module`, `Standard`, `Imports`, `GoFiles`, `CgoFiles`, `CFiles`, `CXXFiles`, `MFiles`, `FFiles`, `SFiles`, `SwigFiles`, `SwigCXXFiles`, `SysoFiles`, `Error`, `DepsErrors`. Plugin sem a metade deste artefato (`Compiled: false`) não entra: o código dele não é compilado aqui.
-4. **Escopo** (contrato 3). Cada pacote do fecho recebe uma classe: `plugin` (módulo de um plugin da lista, inclusive o core), `extended` (pacote de outro módulo, fora da biblioteca padrão e do SDK, que importa diretamente um pacote do SDK) (hipótese), `sdk`, `std` ou `closure` (demais dependências). Para cada pacote, guarda a lista de plugins em cujo fecho ele está.
+4. **Escopo** (contrato 3). Cada pacote do fecho recebe uma classe: `plugin` (módulo de um plugin da lista, inclusive o core), `extended` (pacote de outro módulo, fora da biblioteca padrão e do SDK, que importa diretamente um pacote do SDK) (decisão aprovada na clarificação), `sdk`, `std` ou `closure` (demais dependências). Para cada pacote, guarda a lista de plugins em cujo fecho ele está.
 5. **Regras de fecho** (sem carregar sintaxe): `forbidden_import` sobre os imports de todo pacote fora do SDK e da biblioteca padrão, e `cgo` sobre os arquivos nativos. A posição é a do `import` no arquivo do pacote que importa (lido com `parser.ImportsOnly`) ou a do primeiro arquivo nativo.
 6. **Carga** dos pacotes `plugin` e `extended` com `golang.org/x/tools/go/packages`: sintaxe e `types.Info` desses pacotes; tipos das dependências por dados de exportação compilados no contexto de compilação, com o ambiente de compilador da FDD 21 (inclusive o `CC` do `zig cc` no arm64) e o cache de build do BuildKit (hipótese de modo de carga; contrato 8). Só os `CompiledGoFiles` entram: arquivos `_test.go` e arquivos excluídos por build tag neste contexto não são analisados neste artefato.
 7. **Erro de tipo** num pacote do escopo: cada erro vira `N3X-B010` com a regra `typecheck` e a posição; as regras não rodam naquele pacote, mas rodam nos outros (seção 6).
@@ -262,7 +262,7 @@ flowchart LR
 FROM ghcr.io/giustech/n3x/sidecar-builder:1.0.0-envoy-1.40 AS build
 ARG N3X_VULNDB=https://vulndb.acme.interno
 RUN n3x-plugin add github.com/acme/n3x-plugin-tenant@v0.4.2
-RUN --mount=type=secret,id=git_auth --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     n3x-plugin build --log-format json
 ```
@@ -285,7 +285,7 @@ RUN --mount=type=secret,id=git_auth --mount=type=cache,target=/go/pkg/mod \
 | 1 | `raw_go` | proxy e controller (hipótese) | plugin, extended | instrução `go` | Goroutine sem `recover` derruba o processo (HLD, linha 1; ADR-016) | `s.Go(fn)` na requisição ou `env.Background(nome, fn)` no `New`; na metade de controller, a API de tarefa de fundo da FDD 08 |
 | 2 | `process_exit` | proxy e controller | plugin, extended | encerrar o processo ou a goroutine do worker (tabela A) | Derruba o Envoy ou o controller (HLD, linha 1) | devolva erro: `proxy.Fail(err)`, erro do `New` ou do handler |
 | 3 | `process_global` | proxy e controller | plugin, extended | mexer em estado global do processo (tabela B) (hipótese) | Sinais, runtime Go, ambiente e logger padrão são do Envoy, do runtime e dos outros plugins (`GOMEMLIMIT` da FDD 27, drenagem da FDD 29) | remova; o runtime do N3X já configura o processo |
-| 4 | `init_side_effect` | proxy e controller | plugin, extended | inicializador de pacote com efeito colateral (algoritmo C) | Roda no `dlopen` do Envoy, sem `recover`, e nos passos 5 e 7 com o secret `git_auth` montado (HLD, linha 1; FDD 20) | mova o trabalho para o `New` |
+| 4 | `init_side_effect` | proxy e controller | plugin, extended | inicializador de pacote com efeito colateral (algoritmo C) | Roda no `dlopen` do Envoy, sem `recover`, e nos passos 5 e 7 no ambiente do build, com ZIPs e fontes privadas acessíveis (HLD, linha 1; FDD 20) | mova o trabalho para o `New` |
 | 5 | `unsafe` | proxy e controller | plugin, extended | import de `unsafe`, conversão de ou para tipo com tipo subjacente `unsafe.Pointer`, diretiva `//go:linkname` (algoritmo D) | Fura o isolamento de memória, do token e dos segredos (HLD, linha 2; ADR-005; FDD 04) | use só a API do SDK |
 | 6 | `reflect_sdk` | proxy e controller | plugin, extended | reflexão sobre valor cujo tipo estático alcança tipo do SDK, interface ou parâmetro de tipo (algoritmo E) | `reflect` lê campo não exportado, inclusive o valor de `plugin.Secret` (HLD, linha 2) | use a API pública do tipo; reflexão só sobre tipos próprios concretos |
 | 7 | `cgo` | proxy e controller | plugin (todo arquivo nativo); closure e extended (código C) | `import "C"` e arquivos `.c`, `.cc`, `.cpp`, `.cxx`, `.m`, `.f`, `.F`, `.for`, `.f90`, `.s`, `.S`, `.sx`, `.swig`, `.swigcxx`, `.syso`; no fecho fora da biblioteca padrão, pacote com cgo, C, C++, Objective-C, Fortran, SWIG ou `.syso` (assembly Go de terceiros é aceito) | Crash em C derruba o Envoy; assembly no plugin contorna o sistema de tipos (HLD, linha 3) | remova o código nativo ou troque a dependência por uma em Go puro |
@@ -540,7 +540,7 @@ Violação de fecho (dependência de terceiro que importa `secret/`):
   //n3x:allow <regra> <motivo>
   ```
 - Método: n/a
-- Semântica de status/headers (hipótese; responde ao ponto em aberto "exceção por linha"):
+- Semântica de status/headers (decisão aprovada na clarificação; amplia o FR-012 do PRD, que só diz que o build recusa, e deve ser refletida nele no WORKFLOW 3; responde ao ponto em aberto "exceção por linha"):
   - Sem espaço depois de `//`, como as diretivas `//go:`. Vale para a linha em que está (comentário no fim da linha) ou para a linha seguinte (comentário sozinho na linha)
   - `<regra>` só pode ser `loop_no_ctx` ou `chan_no_ctx`, as duas regras heurísticas. As outras 16 regras não aceitam exceção: isolamento, segredo e queda do processo não têm falso positivo que justifique
   - `<motivo>`: texto livre de 10 a 200 caracteres, obrigatório
@@ -828,7 +828,7 @@ if st.End() {
 - Semântica de status/headers:
   - Os módulos do corpus são servidos por um `GOPROXY=file://` de teste e passam pelos passos 1 a 4 numa imagem falsa (mesma técnica da FDD 20); o teste compara os eventos `problem` e `warning` com o `expected.json` por igualdade de conjunto de (código, regra, plugin, `path`) e de ordem
   - **Crescimento:** cada contorno descoberto vira um caso novo em `malicious/` com o número seguinte e o link da issue, no mesmo PR da correção da regra; casos nunca são removidos. Um contorno aceito como risco residual vai para `known-gaps/` com o motivo, e o teste garante que ele continua sem violação (a mudança de comportamento fica visível)
-  - **Mínimo da v1:** pelo menos um caso `malicious/` por regra do contrato 2 e os casos cruzados: três violações em três arquivos; `forbidden_import` em dependência de terceiro; violação em pacote `extended`; arquivo com cabeçalho falso do `protoc-gen-go` usando `unsafe`; `protoimpl.Pointer` fora do padrão gerado; `//go:linkname`; reflexão via `any`; `init()` que lê `/run/secrets/git_auth`; `init()` que grava um arquivo-sentinela (prova de que a análise não executa código)
+  - **Mínimo da v1:** pelo menos um caso `malicious/` por regra do contrato 2 e os casos cruzados: três violações em três arquivos; `forbidden_import` em dependência de terceiro; violação em pacote `extended`; arquivo com cabeçalho falso do `protoc-gen-go` usando `unsafe`; `protoimpl.Pointer` fora do padrão gerado; `//go:linkname`; reflexão via `any`; `init()` que lê um arquivo do estágio de build (ex.: `/n3x/private/plugin.zip`); `init()` que grava um arquivo-sentinela (prova de que a análise não executa código)
   - **Mínimo legítimo da v1:** plugin core na versão da imagem; `n3x.example`; stubs reais do `protoc-gen-go` (v1.31, v1.34 e v1.36) e do `protoc-gen-go-grpc` (v1.5) (hipótese de versões, pedido à FDD 46); connector go-redis com `Dialer: env.Dial`; connector pgx na metade de proxy com `DialFunc: env.Dial`; cliente HTTP de `env.HTTPClient()`; tarefa de fundo com `proxy.Sleep`; `select` com `ctx.Done()`; respostas de negação e tabelas `regexp.MustCompile` em variável de pacote
   - **Contornos conhecidos da v1 (`known-gaps/`):** dependência de terceiro (classe `closure`) com `unsafe`, `go` cru ou leitura de arquivo; leitura do arquivo da chave AES por `os.ReadFile`; chamada bloqueante de biblioteca de terceiro sem `ctx`; segredo que passa por campo de struct antes do log
 
@@ -999,7 +999,7 @@ aviso vuln_scan_failed: govulncheck não terminou em 150 s; nenhuma vulnerabilid
 - **Base (L-62):** com a base de rede inacessível (servidor de teste que não responde), a sonda desiste em até 10 s e o build usa a cópia com `vuln_db_fallback`; com a cópia de teste datada de 31 dias antes do relógio do teste, `vuln_db_stale`; com um `govulncheck` falso que dorme 200 s, `vuln_scan_failed` em até 155 s e exit 0; com `N3X_VULNDB=image`, nenhuma conexão de rede é aberta; com `N3X_VULNDB=ftp://x`, exit 1 e `#erros-de-uso`
 - **Sem rede de módulos:** com `GOPROXY` apontando para um servidor que falha toda requisição depois do passo 2, o passo 4 termina sem erro
 - **Depreciação:** um SDK de teste com `// Deprecated: desde v1.1.0, use NewThing.` em `proxy.OldThing` e três usos no plugin dá um único `deprecated_api` com `uses: 3` e `since: 1.1.0`
-- **Pedidos das FDDs anteriores**, um teste cada: import de `secret/` e de `secret/secrettest` (FDD 03); `.Reveal()` em `slog`, `fmt.Errorf`, `errors.New`, `proxy.Fail` e `proxy.Forbidden` (FDD 03); `unsafe` no plugin dá violação e `unsafe` dentro do SDK não (FDD 04); `memory.NewRuntime` e `telemetry.NewRegistry` em plugin (FDDs 04 e 06); `proxy.Continue = ...` e `&proxy.ErrRequestPath` (FDD 05); campo `context.Context` e variável de pacote `context.Context` (FDD 06); `var tok, _ = os.ReadFile("/run/secrets/git_auth")` (FDD 20)
+- **Pedidos das FDDs anteriores**, um teste cada: import de `secret/` e de `secret/secrettest` (FDD 03); `.Reveal()` em `slog`, `fmt.Errorf`, `errors.New`, `proxy.Fail` e `proxy.Forbidden` (FDD 03); `unsafe` no plugin dá violação e `unsafe` dentro do SDK não (FDD 04); `memory.NewRuntime` e `telemetry.NewRegistry` em plugin (FDDs 04 e 06); `proxy.Continue = ...` e `&proxy.ErrRequestPath` (FDD 05); campo `context.Context` e variável de pacote `context.Context` (FDD 06); `var zipData, _ = os.ReadFile("/n3x/private/plugin.zip")` (FDD 20)
 - **Determinismo:** 20 execuções do mesmo cenário de falha e do mesmo sucesso, com a base de teste em arquivo, dão stderr idêntico em texto e em JSON, com `ts` e durações normalizados
 - **Desempenho (hipótese):** passo 4 em até 20 s no p95 de 10 execuções com 5 plugins mais o core, cache aquecido e base em rede; `analysis_ms` em até 10 s no p95; num runner amd64 da CI
 - **Qualidade:** `go vet` e `go test -race ./internal/analysis/...` passam; cobertura de linhas de no mínimo 85% em `internal/analysis` e subpacotes (hipótese, a mesma meta das FDDs 19 e 20); fuzzing de `allow.Parse`, do leitor do JSON do `govulncheck` e de `ParseVulnDB` por 5 minutos cada na CI noturna, sem panic (hipótese de duração); `gosec` e `govulncheck` sem achado alto no código do `n3x-builder`
@@ -1076,15 +1076,15 @@ aviso vuln_scan_failed: govulncheck não terminou em 150 s; nenhuma vulnerabilid
     - Medição no job `analysis-perf`
 - **Plano de contingência:** passar para `-scan package` numa minor, perdendo o `called` (exige revisão do ADR-008), ou ajustar a meta na FDD 46
 
-### Código de plugin lê o secret `git_auth` nos passos 5 e 7 (pedido da FDD 20)
+### Código de plugin lê ZIPs e fontes privadas do estágio nos passos 5 e 7 (pedido da FDD 20, revisado)
 
 - **Probabilidade:** baixa
-- **Impacto:** token do GitHub do operador exfiltrado
+- **Impacto:** código privado de outros plugins do mesmo estágio lido ou alterado pela inicialização de pacote; não há token do builder a exfiltrar (decisão aprovada na clarificação da FDD 20)
 - **Mitigação:**
     - `init_side_effect` com lista de permissão: a inicialização de pacote do plugin não pode ler arquivo nem abrir conexão; `raw_network` e `process_global` fecham os atalhos
     - A análise roda antes do passo 5 e não executa código
-    - Guia (FDD 47): token só de leitura, escopo mínimo e vida curta
-- **Plano de contingência:** dividir o build em duas linhas `RUN` (contingência da FDD 20). Avaliação desta FDD: não dividir na v1, porque (1) o único código de plugin executado nos passos 5 e 7 é a inicialização de pacote, coberta pela regra; (2) o risco restante é de dependência de terceiro maliciosa, que em produção teria acesso a muito mais que o token; (3) dividir exige guardar os módulos na camada do estágio de build e duas variantes novas do comando, que mudam o contrato da FDD 20 (hipótese)
+    - Guia (FDD 47): tratar contexto, camadas e cache do estágio como confidenciais
+- **Plano de contingência:** versão nova do builder com a regra reforçada; a divisão do `build` em duas linhas `RUN` deixou de se aplicar
 
 ### Gerador `protoc-gen-go` muda o padrão de `unsafe` ou de `init()`
 

@@ -65,7 +65,7 @@
     {
       "name": "Resolvedor",
       "responsibilities": ["go mod download com o toolchain fixado e conferência do go.sum no sum.golang.org (exceto GOPRIVATE)"],
-      "dependencies": ["Go module proxy", "Secret git_auth"]
+      "dependencies": ["Go module proxy", "ZIPs privados e fonte local de módulos (/n3x/private-proxy/)"]
     },
     {
       "name": "Checador de compatibilidade",
@@ -116,7 +116,7 @@
     "request_flow": [
       "RUN n3x-plugin add <módulo>@<versão>, uma linha por plugin: resolve o módulo, confere a estrutura e registra no workspace",
       "RUN n3x-plugin build passo 1: lê o workspace e o /etc/n3x/target.yaml e inclui o plugin core na versão da imagem",
-      "Passo 2: go mod download com o toolchain fixado, usando o secret git_auth quando houver repositório privado",
+      "Passo 2: go mod download com o toolchain fixado, usando a fonte local de módulos privados (/n3x/private-proxy/) quando houver repositório privado",
       "Passo 3: confere faixa sdk, IDs e serviços duplicados, depends_on e namespace n3x",
       "Passo 4: roda a análise estática e o govulncheck",
       "Passo 5: gera main.go, registro dos plugins e JSON Schema de cada config",
@@ -131,7 +131,7 @@
       "Módulos do plugin (Go proxy ou GitHub) → cache de módulos do BuildKit → código gerado → libn3x.so ou binário → manifesto embutido → imagem final no registro do operador",
       "Struct de types/ → JSON Schema → manifesto → validação do n3x.yaml no sidecar e no controller → mascaramento de segredos pelo plugin core",
       "n3x-plugin.yaml de cada plugin → manifesto embutido → registro no plugin core → inventário e alerta de divergência de manifesto no painel (FR-006)",
-      "Secret git_auth → só o passo 2, via mount de secret, nunca gravado em camada nem no manifesto",
+      "ZIPs de módulos privados e fonte local → copiados com COPY para o estágio de build e usados no add --archive e no passo 2; código confidencial, não credencial, fora da imagem final e do manifesto",
       "Avisos do govulncheck → campo warnings do manifesto e /out/manifest.json"
     ]
   },
@@ -157,11 +157,11 @@
     { "name": "n3x-plugin version e n3x-plugin targets", "kind": "sdk", "protocol": "CLI", "exposure": "external", "sla_limits": "Mostram versões embutidas e o alvo da imagem" },
     { "name": "ghcr.io/giustech/n3x/sidecar-builder:<semver>-<alvo>", "kind": "sdk", "protocol": "Imagem OCI", "exposure": "external", "sla_limits": "amd64 e arm64; tags imutáveis" },
     { "name": "ghcr.io/giustech/n3x/controller-builder:<semver>", "kind": "sdk", "protocol": "Imagem OCI", "exposure": "external", "sla_limits": "amd64 e arm64; tags imutáveis" },
-    { "name": "Secret git_auth, ARG GOPROXY, ARG GOPRIVATE e TARGETARCH", "kind": "sdk", "protocol": "Docker BuildKit", "exposure": "external", "sla_limits": "Secret só no passo de resolução" },
+    { "name": "COPY de ZIP e fonte privada, ARG GOPROXY, ARG GOPRIVATE e TARGETARCH", "kind": "sdk", "protocol": "Docker BuildKit", "exposure": "external", "sla_limits": "Sem credencial no builder; ZIP e fonte local são código confidencial" },
     { "name": "/out/libn3x.so, /out/n3x-controller e /out/manifest.json", "kind": "sdk", "protocol": "Arquivos", "exposure": "external", "sla_limits": "manifest.json é cópia legível do manifesto embutido" },
     { "name": "Seção .n3x_manifest", "kind": "sdk", "protocol": "ELF + JSON (formato 1)", "exposure": "internal", "sla_limits": "Só cresce por adição; lida por sidecar, controller e plugin core" },
     { "name": "targets/<alvo>.yaml", "kind": "sdk", "protocol": "YAML", "exposure": "internal", "sla_limits": "Alvo só vira supported após CI nativa" },
-    { "name": "Erros N3X-B001 a N3X-B013", "kind": "sdk", "protocol": "stderr com exit code por categoria (1 uso, 2 resolução, 3 compatibilidade, 4 análise estática, 5 compilação, 6 símbolos ou carga, 7 manifesto)", "exposure": "external", "sla_limits": "Códigos estáveis, novos só por adição" }
+    { "name": "Erros N3X-B001 a N3X-B016", "kind": "sdk", "protocol": "stderr com exit code por categoria (1 uso, 2 resolução, 3 compatibilidade, 4 análise estática, 5 compilação, 6 símbolos ou carga, 7 manifesto)", "exposure": "external", "sla_limits": "Códigos estáveis, novos só por adição" }
   ],
   "scalability_availability": {
     "strategies": [
@@ -176,15 +176,15 @@
     "sla_target": "Toda tag publicada continua baixável no GHCR (tags imutáveis, nunca apagadas); patch novo do Envoy 1.40.x ou do Istio 1.31.x vira imagem candidate em até 7 dias (hipótese); build com menos de 60 s com cache e menos de 3 min sem cache (hipótese)"
   },
   "security": {
-    "authentication": "Acesso a repositórios privados pelo secret de build git_auth (token do GitHub), montado só no passo de resolução e nunca gravado em camada, log ou manifesto",
+    "authentication": "O builder não recebe credenciais: plugin privado entra por ZIP de módulo Go (add --archive, com --sha256 opcional) e dependências privadas por fonte local copiada pelo operador; ZIP e fonte são código confidencial",
     "authorization": "Namespace n3x exclusivo de github.com/giustech/; plugin core obrigatório e na versão da imagem; análise estática com as regras do HLD do n3x-sdk (go cru, os.Exit, log.Fatal, init() com efeito colateral, unsafe e reflect sobre tipos do SDK, cgo, import do SDK Go do Envoy, de secret/ e de pacotes internos, context.Background() e context.TODO(), chamadas bloqueantes sem ctx e .Reveal() em log; Deprecated só avisa)",
-    "secrets_management": "O único segredo é o git_auth, fornecido no docker buildx build --secret; a chave AES do ENC[...] nunca passa pelo builder",
+    "secrets_management": "O builder não recebe nenhum segredo; a chave AES do ENC[...] também nunca passa por ele",
     "encryption_in_transit": "Downloads do Go proxy, GitHub e GHCR por HTTPS; go.sum conferido no sum.golang.org, exceto GOPRIVATE",
     "encryption_at_rest": "Não se aplica: o builder não guarda dados; integridade do artefato por SHA-256 das seções carregáveis conferido no runtime, sem assinatura nem SBOM na v1",
     "pii_policy": "Sem PII: o builder não lê n3x.yaml, segredos nem dados de usuários; govulncheck só avisa e grava os avisos no campo warnings do manifesto"
   },
   "observability": {
-    "logs": "Texto legível por padrão, uma linha por etapa com duração; --log-format json com um evento por etapa (step, status, duration_ms, code); resumo final com plugins, versões, alvo, arquitetura, hash e avisos; git_auth nunca aparece",
+    "logs": "Texto legível por padrão, uma linha por etapa com duração; --log-format json com um evento por etapa (step, status, duration_ms, code); resumo final com plugins, versões, alvo, arquitetura, hash e avisos; credenciais em URL nunca aparecem",
     "metrics": [
       "Duração de cada etapa do build (no log)",
       "Taxa de sucesso da matriz alvo × arquitetura na CI do builder",
@@ -271,7 +271,7 @@
     ],
     "next_steps": [
       "Criar targets/envoy-1.40.yaml com a pseudo-versão confirmada",
-      "TDD do pipeline n3x-plugin build, começando pelos cenários N3X-B001 a N3X-B013",
+      "TDD do pipeline n3x-plugin build, começando pelos cenários N3X-B001 a N3X-B016",
       "Montar o corpus malicioso da análise estática",
       "Escrever as imagens de build e a CI de matriz com teste de reprodutibilidade",
       "Teste de carga do .so no istio-proxy 1.31"

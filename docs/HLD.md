@@ -20,7 +20,7 @@ Dependências com outros sistemas
 - `n3x-sidecar`: módulo `core/` importado pelo `main` gerado do `.so` e imagem de runtime `n3x/sidecar`, que confere alvo, integridade e versão do manifesto na subida
 - `n3x-controller`: módulo `host/` chamado pelo `main` gerado (`host.Run(core.Plugin(), <plugins>...)`) e imagem de runtime `n3x/controller`
 - `n3x-plugin-core`: incluído sempre, na versão fixada pela imagem de build
-- Go module proxy e `sum.golang.org`, GitHub (com secret de build para repositórios privados) e GHCR
+- Go module proxy e `sum.golang.org`, GitHub (plugins privados entram por ZIP de módulo Go copiado no build, sem credencial) e GHCR
 
 ---
 
@@ -32,7 +32,7 @@ O builder **só existe durante o `docker build`**: não tem serviço, porta nem 
  ┌──────────────────────────────────────────────────────────────────┐
  │ FROM ghcr.io/giustech/n3x/sidecar-builder:1.0.0-envoy-1.40 AS b  │
  │ RUN n3x-plugin add github.com/giustech/n3x-plugin-ratelimit@v1.0.0│
- │ RUN --mount=type=secret,id=git_auth --mount=type=cache,...       │
+ │ RUN --mount=type=cache,...                                       │
  │     n3x-plugin build                                             │
  │ FROM ghcr.io/giustech/n3x/sidecar:1.0.0-envoy-1.40               │
  │ COPY --from=b /out/libn3x.so /usr/lib/n3x/libn3x.so              │
@@ -95,7 +95,7 @@ Tecnologias principais
 - Toolchain C com glibc fixada e `zig cc` para compilar arm64 a partir de amd64
 - `objcopy` para gravar a seção ELF do manifesto
 - `govulncheck` em todo build
-- Docker BuildKit (`--mount=type=secret` e `--mount=type=cache`) e `docker buildx`
+- Docker BuildKit (`--mount=type=cache` e `COPY` de arquivos locais) e `docker buildx`
 - GHCR como registro das imagens
 
 Padrões adotados
@@ -112,7 +112,7 @@ Padrões adotados
 | Catálogo de alvos (`targets/`) | Fixar commit do Envoy, pseudo-versão do SDK Go do Envoy, digest das imagens, glibc, capacidades e status de cada alvo | CI do builder |
 | Workspace (`/n3x/work`) | Guardar `go.mod`, `go.sum` e a lista de plugins entre um `RUN` e outro | Sistema de arquivos da camada |
 | `add` | Resolver `<módulo>@<versão>`, ler o `n3x-plugin.yaml`, conferir estrutura (manifesto, pastas das metades declaradas) e registrar no workspace; aceita o core só na versão da imagem | Go module proxy, GitHub, regras de estrutura do SDK |
-| Resolvedor | `go mod download` com o toolchain fixado, conferindo o `go.sum` no `sum.golang.org` (exceto `GOPRIVATE`) | Go module proxy, secret `git_auth` |
+| Resolvedor | `go mod download` com o toolchain fixado, conferindo o `go.sum` no `sum.golang.org` (exceto `GOPRIVATE`) | Go module proxy, ZIPs privados e fonte local de módulos (`/n3x/private-proxy/`) |
 | Checador de compatibilidade | Conferir faixa `sdk`, IDs e serviços gRPC duplicados, `depends_on` (faltando ou em ciclo), namespace `n3x` restrito a `github.com/giustech/` e presença do core | Manifestos dos plugins, versão do SDK da imagem |
 | Analisador estático | Aplicar as regras do HLD do `n3x-sdk` com `go/analysis` sobre os pacotes de cada plugin e rodar o `govulncheck` (só aviso) | Regras do SDK, base de vulnerabilidades do Go |
 | Gerador | Criar `main.go` (sidecar: importa `core/` e chama `agent.Plugin()`; controller: chama `host.Run(core.Plugin(), ...)`), o registro dos plugins e o JSON Schema de cada config, em ordem fixa | SDK (gerador de schema), `core/`, `host/` |
@@ -147,7 +147,7 @@ n3x-builder/
   - falha com `N3X-B001`, `N3X-B002`, `N3X-B003` ou `N3X-B008`
 - `RUN n3x-plugin build`, etapa por etapa:
   1. lê o workspace e o `/etc/n3x/target.yaml` e inclui o plugin core na versão da imagem
-  2. `go mod download` com o toolchain fixado, usando o secret `git_auth` quando houver repositório privado
+  2. `go mod download` com o toolchain fixado, usando a fonte local de módulos privados (`/n3x/private-proxy/`) quando houver repositório privado
   3. confere a faixa `sdk`, os IDs e serviços duplicados, o `depends_on` e o namespace `n3x`
   4. roda a análise estática e o `govulncheck`
   5. gera o `main.go`, o registro dos plugins e o JSON Schema de cada config
@@ -162,7 +162,7 @@ n3x-builder/
 - Módulos do plugin (Go proxy ou GitHub) → cache de módulos do BuildKit → código gerado → `libn3x.so` ou binário → manifesto embutido → imagem final no registro do operador
 - Struct de `types/` → JSON Schema → manifesto → validação do `n3x.yaml` no sidecar e no controller → mascaramento de segredos pelo plugin core
 - `n3x-plugin.yaml` de cada plugin → manifesto embutido → registro no plugin core → inventário e alerta de divergência de manifesto no painel (FR-006)
-- Secret `git_auth` → só o passo 2, via `--mount=type=secret`, nunca gravado em camada nem no manifesto
+- ZIPs de módulos privados e fonte local → copiados com `COPY` para o estágio de build e usados no `add --archive` e no passo 2; são código confidencial, não credencial, e não entram na imagem final nem no manifesto
 - Avisos do `govulncheck` → campo `warnings` do manifesto e `/out/manifest.json`
 
 **Exemplo de Dockerfile do sidecar**
@@ -171,8 +171,7 @@ n3x-builder/
 FROM ghcr.io/giustech/n3x/sidecar-builder:1.0.0-envoy-1.40 AS build
 RUN n3x-plugin add github.com/giustech/n3x-plugin-ratelimit@v1.0.0
 RUN n3x-plugin add github.com/acme/n3x-plugin-tenant@v0.4.2
-RUN --mount=type=secret,id=git_auth \
-    --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     n3x-plugin build
 
@@ -181,7 +180,15 @@ COPY --from=build /out/libn3x.so /usr/lib/n3x/libn3x.so
 ```
 ```
 docker buildx build --platform linux/amd64,linux/arm64 \
-  --secret id=git_auth,env=GITHUB_TOKEN -t registry.acme/n3x-sidecar:2026.10 --push .
+  -t registry.acme/n3x-sidecar:2026.10 --push .
+```
+
+**Plugin privado** (sem credencial no builder): o operador copia o ZIP no formato de módulo Go e as dependências privadas transitivas para o estágio de build.
+```dockerfile
+COPY dist/n3x-plugin-tenant-v0.4.2.zip /n3x/private/plugin.zip
+COPY private-proxy/ /n3x/private-proxy/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    n3x-plugin add --archive /n3x/private/plugin.zip --sha256 <hex>
 ```
 
 **Exemplo de Dockerfile do controller**
@@ -190,8 +197,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 FROM ghcr.io/giustech/n3x/controller-builder:1.0.0 AS build
 RUN n3x-plugin add github.com/giustech/n3x-plugin-ratelimit@v1.0.0
 RUN n3x-plugin add github.com/acme/n3x-plugin-tenant@v0.4.2
-RUN --mount=type=secret,id=git_auth \
-    --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,target=/go/pkg/mod \
     n3x-plugin build
 
 FROM ghcr.io/giustech/n3x/controller:1.0.0
@@ -255,12 +261,12 @@ Versionamento e retenção
 ### Interfaces públicas
 | Nome | Tipo | Protocolo | Exposição | SLAs/Limites |
 | ---- | ---- | ---------- | --------- | ------------- |
-| `n3x-plugin add <módulo>@<versão>` | SDK | CLI | Externa | Versão exata obrigatória; uma linha por plugin |
+| `n3x-plugin add <módulo>@<versão>` ou `n3x-plugin add --archive <zip> [--sha256 <hex>]` | SDK | CLI | Externa | Versão exata obrigatória; uma linha por plugin; `--archive` para plugin privado, com identidade pelo prefixo do ZIP e `--sha256` opcional |
 | `n3x-plugin build [--log-format text\|json]` | SDK | CLI | Externa | Menos de 60 s com cache e menos de 3 min sem cache, até 5 plugins, amd64 nativo (hipótese) |
 | `n3x-plugin version` e `n3x-plugin targets` | SDK | CLI | Externa | Mostram versões embutidas e o alvo da imagem |
 | `ghcr.io/giustech/n3x/sidecar-builder:<semver>-<alvo>` | SDK | Imagem OCI | Externa | amd64 e arm64; tags imutáveis |
 | `ghcr.io/giustech/n3x/controller-builder:<semver>` | SDK | Imagem OCI | Externa | amd64 e arm64; tags imutáveis |
-| Secret `git_auth`, `ARG GOPROXY`, `ARG GOPRIVATE`, `TARGETARCH` | SDK | Docker BuildKit | Externa | Secret só no passo de resolução |
+| `COPY` de ZIP e fonte privada, `ARG GOPROXY`, `ARG GOPRIVATE`, `TARGETARCH` | SDK | Docker BuildKit | Externa | Sem credencial no builder; o ZIP e a fonte local são código confidencial |
 | `/out/libn3x.so`, `/out/n3x-controller`, `/out/manifest.json` | SDK | Arquivos | Externa | `manifest.json` é cópia legível do embutido |
 | Seção `.n3x_manifest` | SDK | ELF + JSON (formato 1) | Interna (sidecar, controller e plugin core) | Só cresce por adição |
 | `targets/<alvo>.yaml` | SDK | YAML | Interna | Alvo só vira `supported` após CI nativa |
@@ -274,7 +280,7 @@ erro N3X-B004: plugin giustech.ratelimit@1.0.0 exige sdk >=1.3.0 <2.0.0; esta im
 
 | Código | Cenário | Exit code |
 | --- | --- | --- |
-| N3X-B001 | Módulo não encontrado ou sem acesso (falta o secret `git_auth`?) | 2 |
+| N3X-B001 | Módulo não encontrado ou sem acesso (plugin privado: use `add --archive`) | 2 |
 | N3X-B002 | Repositório fora da estrutura: manifesto ausente ou metade declarada sem pasta | 2 |
 | N3X-B003 | Manifesto `n3x-plugin.yaml` inválido | 2 |
 | N3X-B004 | Faixa `sdk` incompatível com a da imagem (mostra a exigida e a disponível) | 3 |
@@ -287,6 +293,9 @@ erro N3X-B004: plugin giustech.ratelimit@1.0.0 exige sdk >=1.3.0 <2.0.0; esta im
 | N3X-B011 | Símbolo ausente no Envoy do alvo | 6 |
 | N3X-B012 | Falha no teste de carga do `.so` | 6 |
 | N3X-B013 | Falha ao gravar o manifesto | 7 |
+| N3X-B014 | Config do plugin sem schema válido (gerador de schema falhou) | 5 |
+| N3X-B015 | Checksum divergente: conteúdo baixado ou ZIP não confere com o `go.sum`, o `sum.golang.org`, o hash gravado pelo `add` ou o `--sha256` | 2 |
+| N3X-B016 | Plugin ou dependência exige Go mais novo que o da imagem | 3 |
 
 Exit code 1 é reservado a erro de uso (comando ou flag inválidos).
 
@@ -314,12 +323,12 @@ Meta de disponibilidade
 
 ### Segurança
 Autenticação
-- Acesso a repositórios privados com o secret de build `git_auth` (token do GitHub), montado só no passo de resolução via `--mount=type=secret`; nunca gravado em camada, log ou manifesto
+- O builder não recebe credenciais: plugin privado entra por ZIP de módulo Go (`add --archive`, com `--sha256` opcional) e dependências privadas por fonte local copiada pelo operador; o ZIP e a fonte são código confidencial e o operador protege contexto, camadas e cache do estágio de build
 
 Autorização
 - Namespace `n3x` exclusivo de módulos `github.com/giustech/` (`N3X-B007`)
 - Plugin core obrigatório e na versão da imagem (`N3X-B008`)
-- Análise estática com as regras do HLD do `n3x-sdk`: `go` cru, `os.Exit`, `log.Fatal`, `init()` com efeito colateral, `unsafe` e `reflect` sobre tipos do SDK, cgo, import do SDK Go do Envoy, de `secret/` e de pacotes internos do sidecar ou do controller, `context.Background()` e `context.TODO()`, chamadas bloqueantes sem `ctx` e `.Reveal()` em log. API `// Deprecated:` gera só aviso
+- Análise estática com as regras do HLD do `n3x-sdk`: `go` cru, `os.Exit`, `log.Fatal`, `init()` com efeito colateral, `unsafe` e `reflect` sobre tipos do SDK, cgo, import do SDK Go do Envoy, de `secret/` e de pacotes internos do sidecar ou do controller, `context.Background()` e `context.TODO()`, chamadas bloqueantes sem `ctx` e `.Reveal()` em log; o catálogo completo das 18 regras do `N3X-B009` está na FDD BLD-06. Pacotes de outros módulos que importam o SDK (escopo `extended`) passam pelas mesmas regras. Exceção por linha `//n3x:allow <regra> <motivo>` só para `loop_no_ctx` e `chan_no_ctx`, com motivo obrigatório e aviso `analysis_exception` no manifesto. API `// Deprecated:` gera só aviso
 
 Proteção de dados
 - `go.sum` conferido no `sum.golang.org`, exceto módulos em `GOPRIVATE`
@@ -330,7 +339,7 @@ Proteção de dados
 - Fora de escopo na v1: assinatura e SBOM
 
 Gestão de segredos
-- Único segredo é o `git_auth`, fornecido pelo operador no `docker buildx build --secret`; a chave AES do `ENC[...]` nunca passa pelo builder
+- O builder não recebe nenhum segredo; a chave AES do `ENC[...]` também nunca passa por ele
 
 ---
 
@@ -339,7 +348,7 @@ Logs
 - Texto legível por padrão, uma linha por etapa com duração, por exemplo `[5/9] gerando registro (3 plugins) ... ok 0.4s`
 - `--log-format json` para a CI do operador: um evento por etapa com `step`, `status`, `duration_ms` e `code`
 - Resumo final: plugins e versões, alvo, arquitetura, hash e avisos do `govulncheck`
-- O secret `git_auth` nunca aparece em log
+- Credenciais em URL e caminhos absolutos do cache de módulos nunca aparecem em log
 
 Métricas
 - No build: duração de cada etapa (no log)
@@ -431,7 +440,7 @@ Decisões pendentes
 
 Próximos passos
 - Criar `targets/envoy-1.40.yaml` com a pseudo-versão confirmada
-- TDD do pipeline `n3x-plugin build`, começando pelos cenários `N3X-B001` a `N3X-B013`
+- TDD do pipeline `n3x-plugin build`, começando pelos cenários `N3X-B001` a `N3X-B016`
 - Montar o corpus "malicioso" da análise estática
 - Escrever as imagens de build e a CI de matriz com teste de reprodutibilidade
 - Teste de carga do `.so` no istio-proxy 1.31
