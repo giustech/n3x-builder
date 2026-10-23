@@ -78,6 +78,21 @@
 - What happens when [boundary condition]?
 - How does system handle [error scenario]?
 
+### Failure Scenarios *(mandatory when the feature can stop `add` or `build`)*
+
+<!--
+  Constitution I, III and VI, and "Testes": every way the feature can fail is a row
+  with its stable code, rule and exit code. Each row becomes at least one test that
+  checks code, rule, exit code and that /out (or the workspace, for add) is untouched.
+  Warnings never change the exit code: list them separately.
+-->
+
+| Scenario | Code | Rule | Exit | Output state |
+| --- | --- | --- | --- | --- |
+| [failure the operator or plugin author can cause] | [N3X-Bxxx] | [rule] | [2-7] | [`/out` untouched / workspace untouched] |
+
+**Warnings**: [warning kinds this feature emits, where they appear (log, summary, manifest), or None]
+
 ## Requirements *(mandatory)*
 
 <!--
@@ -97,6 +112,18 @@
 
 - **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
 - **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
+
+### Public Contracts Affected *(mandatory when the feature touches a public contract)*
+
+<!--
+  Constitution V: codes, exit codes, rule names, warning kinds, manifest fields, JSON
+  events, io.n3x.* labels, commands and ARG allowlist only grow by addition. List each
+  addition; a rename, removal or change of meaning is not allowed.
+-->
+
+- [e.g., new code N3X-Bxxx in family [family], exit [n]]
+- [e.g., new field in manifest format 1]
+- [or: None]
 
 ### Key Entities *(include if feature involves data)*
 

@@ -9,7 +9,7 @@ description: "Task list template for feature implementation"
 
 **Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
 
-**Tests**: The examples below include test tasks. Tests are OPTIONAL - only include them if explicitly requested in the feature specification.
+**Tests**: MANDATORY. The constitution ("Testes") requires TDD from failure scenarios and counts as an explicit TDD request: test tasks come before implementation tasks and must FAIL first. Every `N3X-Bxxx` code in the spec's Failure Scenarios gets at least one test that checks code, rule, exit code and that `/out` (or the workspace, for `add`) is untouched. Use `testify` with the reporter in strict mode.
 
 **Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
 
@@ -21,10 +21,10 @@ description: "Task list template for feature implementation"
 
 ## Path Conventions
 
-- **Single project**: `src/`, `tests/` at repository root
-- **Web app**: `backend/src/`, `frontend/src/`
-- **Mobile**: `api/src/`, `ios/src/` or `android/src/`
-- Paths shown below assume single project - adjust based on plan.md structure
+- **CLI**: `cmd/n3x-plugin/`; **pipeline**: `internal/<area>/` (core as pure functions, ports as Go interfaces, adapters separate)
+- **Tests**: `*_test.go` next to the code; fixtures, test plugins, malicious corpus and golden files in `testdata/`
+- **Other areas**: `targets/`, `images/` (and `images/tools/`), `ci/n3xci/`, `compat/` (append-only), `examples/`
+- Adjust to the Structure Decision in plan.md
 
 <!--
   ============================================================================
@@ -63,12 +63,11 @@ description: "Task list template for feature implementation"
 
 Examples of foundational tasks (adjust based on your project):
 
-- [ ] T004 Setup database schema and migrations framework
-- [ ] T005 [P] Implement authentication/authorization framework
-- [ ] T006 [P] Setup API routing and middleware structure
-- [ ] T007 Create base models/entities that all stories depend on
-- [ ] T008 Configure error handling and logging infrastructure
-- [ ] T009 Setup environment configuration management
+- [ ] T004 Define ports (Go interfaces) for the external resources this feature uses in internal/[area]/ports.go
+- [ ] T005 [P] Write fakes for those ports in internal/[area]/fake_test.go (also fakes for SDK rules not yet released)
+- [ ] T006 [P] Register new `N3X-Bxxx` codes, rules and warning kinds in the reporter catalog (internal/report)
+- [ ] T007 Regenerate docs/erros.md from the catalog
+- [ ] T008 Wire the step into the pipeline order without changing other steps' contracts
 
 **Checkpoint**: Foundation ready - user story implementation can now begin in parallel
 
@@ -80,21 +79,20 @@ Examples of foundational tasks (adjust based on your project):
 
 **Independent Test**: [How to verify this story works on its own]
 
-### Tests for User Story 1 (OPTIONAL - only if tests requested) ⚠️
+### Tests for User Story 1 (MANDATORY - TDD) ⚠️
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T010 [P] [US1] Contract test for [endpoint] in tests/contract/test_[name].py
-- [ ] T011 [P] [US1] Integration test for [user journey] in tests/integration/test_[name].py
+- [ ] T010 [P] [US1] Failure-scenario test for N3X-B[xxx] (code, rule, exit, `/out` untouched) in internal/[area]/[name]_test.go
+- [ ] T011 [P] [US1] Golden-file test for [generated output] in internal/[area]/[name]_test.go with testdata/[area]/
+- [ ] T012 [P] [US1] Malicious-corpus case for [bypass] in testdata/corpus/[case]/ (if the story touches analysis)
 
 ### Implementation for User Story 1
 
-- [ ] T012 [P] [US1] Create [Entity1] model in src/models/[entity1].py
-- [ ] T013 [P] [US1] Create [Entity2] model in src/models/[entity2].py
-- [ ] T014 [US1] Implement [Service] in src/services/[service].py (depends on T012, T013)
-- [ ] T015 [US1] Implement [endpoint/feature] in src/[location]/[file].py
-- [ ] T016 [US1] Add validation and error handling
-- [ ] T017 [US1] Add logging for user story 1 operations
+- [ ] T013 [P] [US1] Implement [rule] as a pure function in internal/[area]/[file].go
+- [ ] T014 [P] [US1] Implement [adapter] behind its port in internal/[area]/[adapter].go
+- [ ] T015 [US1] Wire [step/command] in cmd/n3x-plugin/[command].go (depends on T013, T014)
+- [ ] T016 [US1] Report failures and warnings only through the reporter (internal/report)
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently
 
@@ -106,16 +104,16 @@ Examples of foundational tasks (adjust based on your project):
 
 **Independent Test**: [How to verify this story works on its own]
 
-### Tests for User Story 2 (OPTIONAL - only if tests requested) ⚠️
+### Tests for User Story 2 (MANDATORY - TDD) ⚠️
 
-- [ ] T018 [P] [US2] Contract test for [endpoint] in tests/contract/test_[name].py
-- [ ] T019 [P] [US2] Integration test for [user journey] in tests/integration/test_[name].py
+- [ ] T018 [P] [US2] Failure-scenario test for N3X-B[xxx] in internal/[area]/[name]_test.go
+- [ ] T019 [P] [US2] Golden-file test for [output] in internal/[area]/[name]_test.go
 
 ### Implementation for User Story 2
 
-- [ ] T020 [P] [US2] Create [Entity] model in src/models/[entity].py
-- [ ] T021 [US2] Implement [Service] in src/services/[service].py
-- [ ] T022 [US2] Implement [endpoint/feature] in src/[location]/[file].py
+- [ ] T020 [P] [US2] Implement [rule] as a pure function in internal/[area]/[file].go
+- [ ] T021 [US2] Implement [adapter] behind its port in internal/[area]/[adapter].go
+- [ ] T022 [US2] Wire [step/command] in cmd/n3x-plugin/[command].go
 - [ ] T023 [US2] Integrate with User Story 1 components (if needed)
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently
@@ -128,16 +126,16 @@ Examples of foundational tasks (adjust based on your project):
 
 **Independent Test**: [How to verify this story works on its own]
 
-### Tests for User Story 3 (OPTIONAL - only if tests requested) ⚠️
+### Tests for User Story 3 (MANDATORY - TDD) ⚠️
 
-- [ ] T024 [P] [US3] Contract test for [endpoint] in tests/contract/test_[name].py
-- [ ] T025 [P] [US3] Integration test for [user journey] in tests/integration/test_[name].py
+- [ ] T024 [P] [US3] Failure-scenario test for N3X-B[xxx] in internal/[area]/[name]_test.go
+- [ ] T025 [P] [US3] Golden-file test for [output] in internal/[area]/[name]_test.go
 
 ### Implementation for User Story 3
 
-- [ ] T026 [P] [US3] Create [Entity] model in src/models/[entity].py
-- [ ] T027 [US3] Implement [Service] in src/services/[service].py
-- [ ] T028 [US3] Implement [endpoint/feature] in src/[location]/[file].py
+- [ ] T026 [P] [US3] Implement [rule] as a pure function in internal/[area]/[file].go
+- [ ] T027 [US3] Implement [adapter] behind its port in internal/[area]/[adapter].go
+- [ ] T028 [US3] Wire [step/command] in cmd/n3x-plugin/[command].go
 
 **Checkpoint**: All user stories should now be independently functional
 
@@ -151,11 +149,13 @@ Examples of foundational tasks (adjust based on your project):
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] TXXX [P] Documentation updates in docs/
-- [ ] TXXX Code cleanup and refactoring
-- [ ] TXXX Performance optimization across all stories
-- [ ] TXXX [P] Additional unit tests (if requested) in tests/unit/
-- [ ] TXXX Security hardening
+- [ ] TXXX [P] Regenerate docs/erros.md and update contract docs for every added code, rule, warning kind or manifest field
+- [ ] TXXX [P] Add fuzz targets for new readers of external input (run nightly)
+- [ ] TXXX Check coverage: ≥ 85% overall, ≥ 90% in internal/symbols and artifact
+- [ ] TXXX Check reproducibility: double compilation gives the same `SHF_ALLOC` hash
+- [ ] TXXX Check the log never shows credentials in URLs or absolute module-cache paths
+- [ ] TXXX Run `go vet`, `gofmt -l`, `go test -race ./...`, `gosec`, `govulncheck` and `actionlint`
+- [ ] TXXX Measure the affected "Metas não funcionais" as stated in plan.md
 - [ ] TXXX Run quickstart.md validation
 
 ---
@@ -179,10 +179,10 @@ Examples of foundational tasks (adjust based on your project):
 
 ### Within Each User Story
 
-- Tests (if included) MUST be written and FAIL before implementation
-- Models before services
-- Services before endpoints
-- Core implementation before integration
+- Tests MUST be written and FAIL before implementation
+- Ports before core rules and adapters
+- Core rules (pure functions) before adapters
+- Adapters before CLI wiring
 - Story complete before moving to next priority
 
 ### Parallel Opportunities
@@ -199,13 +199,13 @@ Examples of foundational tasks (adjust based on your project):
 ## Parallel Example: User Story 1
 
 ```bash
-# Launch all tests for User Story 1 together (if tests requested):
-Task: "Contract test for [endpoint] in tests/contract/test_[name].py"
-Task: "Integration test for [user journey] in tests/integration/test_[name].py"
+# Launch all tests for User Story 1 together:
+Task: "Failure-scenario test for N3X-B[xxx] in internal/[area]/[name]_test.go"
+Task: "Golden-file test for [generated output] in internal/[area]/[name]_test.go"
 
-# Launch all models for User Story 1 together:
-Task: "Create [Entity1] model in src/models/[entity1].py"
-Task: "Create [Entity2] model in src/models/[entity2].py"
+# Launch the core rule and the adapter for User Story 1 together:
+Task: "Implement [rule] as a pure function in internal/[area]/[file].go"
+Task: "Implement [adapter] behind its port in internal/[area]/[adapter].go"
 ```
 
 ---

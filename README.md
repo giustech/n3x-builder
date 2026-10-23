@@ -650,6 +650,7 @@ Design documents (in Brazilian Portuguese):
 
 ## Development
 
+- **Constitution:** the non-negotiable project rules (principles, architecture, quality gates and governance) live in [`.specify/memory/constitution.md`](.specify/memory/constitution.md), in Brazilian Portuguese. When a design document disagrees with it, the constitution wins until the document is fixed.
 - **Flow:** PRD → HLD → FDD → [GitHub Spec Kit](https://github.com/github/spec-kit). Each group in `specs/README.md` goes through `specify`, `clarify`, `plan`, `tasks` and `implement`.
 - **Stack:** Go 1.26, `cobra` for the CLIs and `testify` for tests.
 - **Architecture:** hexagonal. Pipeline rules live in the core as pure functions, and ports wrap the toolchain, `objcopy`, Envoy, the module network, the filesystem and the clock.
